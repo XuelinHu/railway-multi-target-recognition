@@ -1,0 +1,4 @@
+# Optional GPU inference stack. Install in the backend environment when you want
+# to run real YOLO inference instead of the default mock backend.
+ultralytics>=8.3.0
+opencv-python-headless>=4.10.0

@@ -1,0 +1,30 @@
+services:
+  backend:
+    image: python:3.11-slim
+    working_dir: /app/backend
+    command: >
+      sh -c "pip install -e . &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      DATA_DIR: /app/data
+      INFERENCE_BACKEND: mock
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+
+  frontend:
+    image: node:24
+    working_dir: /app/frontend
+    command: >
+      sh -c "npm install &&
+             npm run dev -- --host 0.0.0.0"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/app
+    depends_on:
+      - backend
