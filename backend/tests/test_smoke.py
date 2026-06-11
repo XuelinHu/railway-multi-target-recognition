@@ -1,5 +1,6 @@
 import io
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -47,6 +48,11 @@ def test_upload_detect_edit_and_export(monkeypatch, tmp_path):
     assert annotations_response.status_code == 200
     annotations = annotations_response.json()
     assert annotations["frames"][0]["objects"][0]["label"] == "railway_target"
+    assert annotations["frames"][0]["image_url"] == f"/api/assets/{asset['id']}/frames/0/image"
+
+    frame_response = client.get(annotations["frames"][0]["image_url"])
+    assert frame_response.status_code == 200
+    assert frame_response.headers["content-type"] == "image/jpeg"
 
     annotations["frames"][0]["objects"][0]["label"] = "confirmed_target"
     annotations["frames"][0]["objects"][0]["status"] = "edited"
@@ -61,3 +67,58 @@ def test_upload_detect_edit_and_export(monkeypatch, tmp_path):
     yolo_response = client.get(f"/api/assets/{asset['id']}/export?format=yolo")
     assert yolo_response.status_code == 200
     assert "confirmed_target" in yolo_response.text
+
+    review_response = client.post(
+        f"/api/assets/{asset['id']}/annotations/review",
+        json={"status": "approved"},
+    )
+    assert review_response.status_code == 200
+    reviewed = review_response.json()
+    assert reviewed["review_status"] == "approved"
+    assert reviewed["frames"][0]["review_status"] == "approved"
+
+
+def test_video_upload_extracts_frames_and_detects(monkeypatch, tmp_path):
+    cv2 = pytest.importorskip("cv2")
+    import numpy as np
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("INFERENCE_BACKEND", "mock")
+    monkeypatch.setenv("RUN_TASKS_INLINE", "true")
+    get_settings.cache_clear()
+    get_store.cache_clear()
+
+    video_path = tmp_path / "rail.mp4"
+    writer = cv2.VideoWriter(
+        str(video_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        5,
+        (160, 90),
+    )
+    for value in (40, 90, 140):
+        writer.write(np.full((90, 160, 3), value, dtype=np.uint8))
+    writer.release()
+
+    client = TestClient(create_app())
+    upload = client.post(
+        "/api/assets/upload",
+        files={"file": ("rail.mp4", video_path.read_bytes(), "video/mp4")},
+    )
+    assert upload.status_code == 200
+    asset = upload.json()
+    assert asset["type"] == "video"
+    assert asset["frame_count"] == 3
+
+    task_response = client.post(
+        "/api/tasks/detect",
+        json={"asset_id": asset["id"], "confidence": 0.25, "iou": 0.7, "frame_stride": 1},
+    )
+    assert task_response.status_code == 202
+    assert task_response.json()["status"] == "completed"
+
+    annotations_response = client.get(f"/api/assets/{asset['id']}/annotations")
+    assert annotations_response.status_code == 200
+    annotations = annotations_response.json()
+    assert [frame["frame_index"] for frame in annotations["frames"]] == [0, 1, 2]
+    assert all(frame["objects"] for frame in annotations["frames"])
+    assert client.get(annotations["frames"][1]["image_url"]).status_code == 200

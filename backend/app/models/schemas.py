@@ -9,6 +9,7 @@ AssetType = Literal["image", "video", "unknown"]
 TaskStatus = Literal["queued", "running", "completed", "failed"]
 ObjectStatus = Literal["auto", "confirmed", "edited", "rejected"]
 ObjectSource = Literal["auto", "manual"]
+ReviewStatus = Literal["pending_review", "in_review", "approved", "rejected"]
 
 
 def new_id(prefix: str) -> str:
@@ -41,6 +42,8 @@ class AnnotationFrame(BaseModel):
     timestamp_ms: int = Field(ge=0)
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
+    image_url: str | None = None
+    review_status: ReviewStatus = "pending_review"
     objects: list[DetectionObject] = Field(default_factory=list)
 
 
@@ -48,8 +51,10 @@ class AnnotationsDocument(BaseModel):
     asset_id: str
     type: AssetType
     model: str
+    review_status: ReviewStatus = "pending_review"
     frames: list[AnnotationFrame] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=now_utc)
+    reviewed_at: datetime | None = None
 
 
 class Asset(BaseModel):
@@ -61,6 +66,7 @@ class Asset(BaseModel):
     size_bytes: int
     width: int | None = None
     height: int | None = None
+    frame_count: int | None = None
     duration_ms: int | None = None
     fps: float | None = None
     created_at: datetime = Field(default_factory=now_utc)
@@ -71,6 +77,11 @@ class DetectionRequest(BaseModel):
     confidence: float = Field(default=0.25, ge=0, le=1)
     iou: float = Field(default=0.7, ge=0, le=1)
     frame_stride: int = Field(default=1, ge=1)
+    max_frames: int | None = Field(default=None, ge=1)
+
+
+class ReviewRequest(BaseModel):
+    status: ReviewStatus
 
 
 class DetectTask(BaseModel):

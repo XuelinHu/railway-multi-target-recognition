@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 from app.core.dependencies import get_storage_service, get_store
 from app.models.schemas import Asset
@@ -30,3 +31,18 @@ def get_asset(asset_id: str, store: JsonStore = Depends(get_store)) -> Asset:
     if asset is None:
         raise HTTPException(status_code=404, detail="asset not found")
     return asset
+
+
+@router.get("/{asset_id}/frames/{frame_index}/image")
+def get_frame_image(
+    asset_id: str,
+    frame_index: int,
+    storage: StorageService = Depends(get_storage_service),
+    store: JsonStore = Depends(get_store),
+) -> FileResponse:
+    if store.get_asset(asset_id) is None:
+        raise HTTPException(status_code=404, detail="asset not found")
+    frame_path = storage.frame_path(asset_id, frame_index)
+    if not frame_path.exists():
+        raise HTTPException(status_code=404, detail="frame image not found")
+    return FileResponse(frame_path, media_type="image/jpeg")

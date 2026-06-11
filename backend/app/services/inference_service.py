@@ -12,11 +12,13 @@ from app.models.schemas import (
     DetectionObject,
     DetectionRequest,
 )
+from app.services.storage_service import FrameSource, StorageService
 
 
 class InferenceService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, storage: StorageService) -> None:
         self.settings = settings
+        self.storage = storage
         self._model: Any | None = None
 
     @property
@@ -26,51 +28,62 @@ class InferenceService:
         return "mock"
 
     def predict(self, asset: Asset, request: DetectionRequest) -> AnnotationsDocument:
+        frames = self.storage.extract_frames(
+            asset,
+            frame_stride=request.frame_stride,
+            max_frames=request.max_frames,
+        )
         if self.settings.inference_backend == "ultralytics":
-            return self._predict_ultralytics(asset, request)
-        return self._predict_mock(asset)
+            return self._predict_ultralytics(asset, request, frames)
+        return self._predict_mock(asset, frames)
 
-    def _predict_mock(self, asset: Asset) -> AnnotationsDocument:
-        width = asset.width or 640
-        height = asset.height or 360
-        bbox = BBox(
-            x=round(width * 0.35, 2),
-            y=round(height * 0.28, 2),
-            width=round(width * 0.3, 2),
-            height=round(height * 0.42, 2),
-        )
-        frame = AnnotationFrame(
-            frame_index=0,
-            timestamp_ms=0,
-            width=width,
-            height=height,
-            objects=[
-                DetectionObject(
-                    label="railway_target",
-                    confidence=0.88,
-                    bbox=bbox,
+    def _predict_mock(self, asset: Asset, frames: list[FrameSource]) -> AnnotationsDocument:
+        annotation_frames: list[AnnotationFrame] = []
+        for frame_source in frames:
+            width = frame_source.width
+            height = frame_source.height
+            bbox = BBox(
+                x=round(width * 0.35, 2),
+                y=round(height * 0.28, 2),
+                width=round(width * 0.3, 2),
+                height=round(height * 0.42, 2),
+            )
+            annotation_frames.append(
+                AnnotationFrame(
+                    frame_index=frame_source.frame_index,
+                    timestamp_ms=frame_source.timestamp_ms,
+                    width=width,
+                    height=height,
+                    image_url=frame_source.image_url,
+                    objects=[
+                        DetectionObject(
+                            label="railway_target",
+                            confidence=0.88,
+                            bbox=bbox,
+                        )
+                    ],
                 )
-            ],
-        )
-        return AnnotationsDocument(asset_id=asset.id, type=asset.type, model="mock", frames=[frame])
+            )
+        return AnnotationsDocument(asset_id=asset.id, type=asset.type, model="mock", frames=annotation_frames)
 
-    def _predict_ultralytics(self, asset: Asset, request: DetectionRequest) -> AnnotationsDocument:
+    def _predict_ultralytics(
+        self,
+        asset: Asset,
+        request: DetectionRequest,
+        frames: list[FrameSource],
+    ) -> AnnotationsDocument:
         model = self._load_ultralytics_model()
-        source = asset.path
-        frames: list[AnnotationFrame] = []
-        results = model.predict(
-            source=source,
-            conf=request.confidence,
-            iou=request.iou,
-            device=self.settings.device,
-            stream=True,
-            verbose=False,
-        )
+        annotation_frames: list[AnnotationFrame] = []
 
-        for frame_index, result in enumerate(results):
-            if frame_index % request.frame_stride != 0:
-                continue
-            height, width = self._result_shape(result, asset)
+        for frame_source in frames:
+            result = model.predict(
+                source=str(frame_source.path),
+                conf=request.confidence,
+                iou=request.iou,
+                device=self.settings.device,
+                verbose=False,
+            )[0]
+            height, width = self._result_shape(result, asset, frame_source)
             objects: list[DetectionObject] = []
             names = getattr(result, "names", {}) or {}
             boxes = getattr(result, "boxes", None)
@@ -93,16 +106,17 @@ class InferenceService:
                             track_id=track_id,
                         )
                     )
-            frames.append(
+            annotation_frames.append(
                 AnnotationFrame(
-                    frame_index=frame_index,
-                    timestamp_ms=self._timestamp_ms(asset, frame_index),
+                    frame_index=frame_source.frame_index,
+                    timestamp_ms=frame_source.timestamp_ms,
                     width=width,
                     height=height,
+                    image_url=frame_source.image_url,
                     objects=objects,
                 )
             )
-        return AnnotationsDocument(asset_id=asset.id, type=asset.type, model=self.model_name, frames=frames)
+        return AnnotationsDocument(asset_id=asset.id, type=asset.type, model=self.model_name, frames=annotation_frames)
 
     def _load_ultralytics_model(self) -> Any:
         if self._model is not None:
@@ -116,19 +130,12 @@ class InferenceService:
         self._model = YOLO(model_path)
         return self._model
 
-    def _result_shape(self, result: Any, asset: Asset) -> tuple[int, int]:
+    def _result_shape(self, result: Any, asset: Asset, frame_source: FrameSource) -> tuple[int, int]:
         if getattr(result, "orig_shape", None):
             height, width = result.orig_shape[:2]
             return int(height), int(width)
-        if asset.height and asset.width:
-            return asset.height, asset.width
-        if asset.type == "image":
-            with Image.open(asset.path) as image:
-                width, height = image.size
-                return height, width
-        return 360, 640
-
-    def _timestamp_ms(self, asset: Asset, frame_index: int) -> int:
-        if asset.fps:
-            return int(frame_index / asset.fps * 1000)
-        return 0
+        if frame_source.height and frame_source.width:
+            return frame_source.height, frame_source.width
+        with Image.open(frame_source.path) as image:
+            width, height = image.size
+            return height, width

@@ -19,7 +19,7 @@ def get_storage_service() -> StorageService:
 
 
 def get_inference_service() -> InferenceService:
-    return InferenceService(get_settings())
+    return InferenceService(get_settings(), get_storage_service())
 
 
 def get_task_service() -> TaskService:

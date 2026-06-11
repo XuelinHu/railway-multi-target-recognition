@@ -25,11 +25,14 @@ export type AnnotationsDocument = {
   asset_id: string;
   type: "image" | "video" | "unknown";
   model: string;
+  review_status: "pending_review" | "in_review" | "approved" | "rejected";
   frames: Array<{
     frame_index: number;
     timestamp_ms: number;
     width?: number | null;
     height?: number | null;
+    image_url?: string | null;
+    review_status: "pending_review" | "in_review" | "approved" | "rejected";
     objects: Array<{
       id: string;
       label: string;
@@ -41,6 +44,7 @@ export type AnnotationsDocument = {
     }>;
   }>;
   updated_at: string;
+  reviewed_at?: string | null;
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
@@ -67,11 +71,17 @@ export function listAssets(): Promise<Asset[]> {
   return request<Asset[]>("/api/assets");
 }
 
-export function createDetectionTask(assetId: string): Promise<DetectTask> {
+export function createDetectionTask(assetId: string, frameStride = 1, maxFrames?: number): Promise<DetectTask> {
   return request<DetectTask>("/api/tasks/detect", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ asset_id: assetId, confidence: 0.25, iou: 0.7, frame_stride: 1 }),
+    body: JSON.stringify({
+      asset_id: assetId,
+      confidence: 0.25,
+      iou: 0.7,
+      frame_stride: frameStride,
+      max_frames: maxFrames || undefined,
+    }),
   });
 }
 
@@ -89,6 +99,22 @@ export function saveAnnotations(assetId: string, annotations: AnnotationsDocumen
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(annotations),
   });
+}
+
+export function reviewAnnotations(
+  assetId: string,
+  status: "pending_review" | "in_review" | "approved" | "rejected",
+): Promise<AnnotationsDocument> {
+  return request<AnnotationsDocument>(`/api/assets/${assetId}/annotations/review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+}
+
+export function frameImageUrl(path?: string | null): string {
+  if (!path) return "";
+  return `${API_BASE_URL}${path}`;
 }
 
 export async function exportAnnotations(assetId: string, format: "json" | "coco" | "yolo"): Promise<string> {
