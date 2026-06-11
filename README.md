@@ -1,14 +1,13 @@
 # Railway Multi-Target Recognition
 
 <p align="center">
-  <img height="20" src="https://img.shields.io/badge/fastapi-%3E%3D0.115.0-009688" />
-  <img height="20" src="https://img.shields.io/badge/python-%3E%3D3.11-3776AB" />
-  <img height="20" src="https://img.shields.io/badge/react-19.2.0-61DAFB" />
-  <img height="20" src="https://img.shields.io/badge/vite-7.2.0-646CFF" />
-  <img height="20" src="https://img.shields.io/badge/typescript-5.9.0-3178C6" />
-  <img height="20" src="https://img.shields.io/badge/node.js-24-5FA04E" />
+  <img height="20" src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&amp;logoColor=white" />
+  <img height="20" src="https://img.shields.io/badge/fastapi-0.115%2B-009688?logo=fastapi&amp;logoColor=white" />
+  <img height="20" src="https://img.shields.io/badge/react-19.2-61DAFB?logo=react&amp;logoColor=black" />
+  <img height="20" src="https://img.shields.io/badge/vite-7.2-646CFF?logo=vite&amp;logoColor=white" />
+  <img height="20" src="https://img.shields.io/badge/typescript-5.9-3178C6?logo=typescript&amp;logoColor=white" />
   <img height="20" src="https://img.shields.io/badge/ultralytics-optional-111F68" />
-  <img height="20" src="https://img.shields.io/badge/docker_compose-configured-2496ED" />
+  <img height="20" src="https://img.shields.io/badge/docker_compose-configured-2496ED?logo=docker&amp;logoColor=white" />
 </p>
 
 铁路多目标识别与人工复核系统骨架。系统支持上传图片或视频，自动生成目标检测结果，再通过 Web 页面进行人工检查、编辑和导出，适合作为后续接入 RTX 3090 GPU、YOLO 权重和铁路场景专用数据集的基础工程。
