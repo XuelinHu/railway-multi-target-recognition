@@ -1,7 +1,7 @@
 from functools import lru_cache
 
 from app.core.config import get_settings
-from app.repositories.json_store import JsonStore
+from app.repositories.postgres_store import PostgresStore
 from app.services.export_service import ExportService
 from app.services.inference_service import InferenceService
 from app.services.storage_service import StorageService
@@ -9,8 +9,8 @@ from app.services.task_service import TaskService
 
 
 @lru_cache
-def get_store() -> JsonStore:
-    return JsonStore(get_settings().db_path)
+def get_store() -> PostgresStore:
+    return PostgresStore(get_settings().database_url)
 
 
 def get_storage_service() -> StorageService:

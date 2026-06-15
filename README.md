@@ -6,7 +6,8 @@
   <img height="20" src="https://img.shields.io/badge/vue-3.5%2B-42B883?logo=vuedotjs&amp;logoColor=white" />
   <img height="20" src="https://img.shields.io/badge/vite-7.2-646CFF?logo=vite&amp;logoColor=white" />
   <img height="20" src="https://img.shields.io/badge/typescript-5.9-3178C6?logo=typescript&amp;logoColor=white" />
-  <img height="20" src="https://img.shields.io/badge/ultralytics-optional-111F68" />
+  <img height="20" src="https://img.shields.io/badge/postgresql-16-4169E1?logo=postgresql&amp;logoColor=white" />
+  <img height="20" src="https://img.shields.io/badge/tensorrt-optional-76B900?logo=nvidia&amp;logoColor=white" />
   <img height="20" src="https://img.shields.io/badge/docker_compose-configured-2496ED?logo=docker&amp;logoColor=white" />
 </p>
 
@@ -19,8 +20,10 @@
 - FastAPI 任务接口，支持创建识别任务、查询任务状态。
 - 可替换推理层，默认 `mock` 后端用于本地冒烟测试。
 - 可选 Ultralytics YOLO 推理后端，用于接入真实 GPU 权重。
-- 标注结果、帧图 URL、帧级状态和文档级人工校验状态持久化保存。
+- PostgreSQL 持久化资产、任务、标注和人工校验状态。
+- PostgreSQL 任务表作为推理队列，使用行锁领取任务，不依赖 Redis。
 - 人工校验支持通过、驳回、目标级确认、编辑和剔除。
+- 检测框支持新增、拖动和四角缩放。
 - JSON、COCO、YOLO 三种格式导出。
 - Vue 前端工作台，提供上传、逐帧预览、检测框叠加、人工校验和导出入口。
 
@@ -31,16 +34,19 @@ Vue + Vite Web
   上传资源、触发逐帧标注、查看任务、预览帧图、人工校验、导出结果
         |
 FastAPI Backend
-  API 路由、任务编排、文件管理、标注保存、格式导出
+  API 路由、文件管理、标注保存、格式导出
+        |
+PostgreSQL
+  资产/标注存储 + queued 任务表 + SKIP LOCKED worker
         |
 Inference Service
-  抽帧 -> mock 冒烟测试后端 / Ultralytics YOLO 真实推理后端 -> 帧级标注
+  抽帧 -> mock / Ultralytics YOLO / TensorRT engine -> 帧级标注
         |
 Local Storage
-  data/uploads 保存原始资源和帧图，data/db.json 保存任务和标注
+  data/uploads 保存原始资源和帧图
 ```
 
-当前版本使用本地 JSON 文件作为轻量存储，便于快速跑通闭环。后续可替换为 PostgreSQL、Redis 队列和 MinIO 对象存储。
+当前版本使用 PostgreSQL 同时承担业务存储和任务队列。FastAPI 启动后会自动创建数据表，并启动数据库任务 worker。
 
 ## 目录结构
 
@@ -50,8 +56,8 @@ backend/
     api/              FastAPI 路由
     core/             配置与依赖注入
     models/           Pydantic 数据模型
-    repositories/     本地 JSON 存储适配
-    services/         上传、推理、任务、导出服务
+    repositories/     PostgreSQL 存储与任务领取
+    services/         上传、推理、数据库任务 worker、导出服务
   tests/              后端冒烟测试
 frontend/
   src/
@@ -70,7 +76,8 @@ scripts/
 ```bash
 cd backend
 uv sync --dev
-DATA_DIR=./data INFERENCE_BACKEND=mock uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+cp .env.example .env
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 前端：
@@ -84,28 +91,30 @@ npm run dev
 默认访问：
 
 ```text
-Frontend: http://localhost:5173
+Frontend: http://localhost:4004
 Backend:  http://localhost:8000
 API Docs: http://localhost:8000/docs
 ```
 
 FRP 映射时保持内网端口不变：
 
+按 `frp` skill 的端口范围，前端使用本机 `4000-4010`，后端使用本机 `8000-8010`。例如本项目使用本地前端 `4004`、本地后端 `8000`：
+
+```bash
+VITE_API_BASE_URL=http://47.120.48.245:18000 npm run dev -- --host 0.0.0.0 --port 4004
+```
+
+对应外网地址：
+
 ```text
-Vue frontend local port: 5173
-FastAPI backend local port: 8000
+Frontend: http://47.120.48.245:14004
+Backend:  http://47.120.48.245:18000
 ```
 
-本机暂未找到 `dev-start-network-config` 技能文件，因此没有在仓库中硬编码公网域名或远程端口。按你的 FRP 配置把公网前端端口转发到 `127.0.0.1:5173`，后端端口转发到 `127.0.0.1:8000` 后，前端启动时设置：
+后端跨域放行前端地址：
 
 ```bash
-VITE_API_BASE_URL=http://<FRP_BACKEND_HOST_OR_IP>:<FRP_BACKEND_PORT> npm run dev -- --host 0.0.0.0
-```
-
-后端跨域需要同步放行 FRP 前端地址：
-
-```bash
-CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://<FRP_FRONTEND_HOST_OR_IP>:<FRP_FRONTEND_PORT>
+CORS_ORIGINS=http://localhost:4004,http://127.0.0.1:4004,http://47.120.48.245:14004
 ```
 
 也可以使用脚本：
@@ -115,7 +124,27 @@ CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://<FRP_FRONTEND_HO
 ./scripts/dev-frontend.sh
 ```
 
-## 真实 YOLO 推理
+## PostgreSQL
+
+创建数据库：
+
+```sql
+CREATE DATABASE railway_recognition;
+```
+
+本地 `.env` 配置：
+
+```text
+DATABASE_URL=postgresql+psycopg://deipss:<PASSWORD>@127.0.0.1:5432/railway_recognition
+TASK_WORKER_ENABLED=true
+TASK_POLL_INTERVAL_SECONDS=1
+```
+
+密码只写入未提交的 `backend/.env`，不要写入源码或 README。
+
+任务创建后先以 `queued` 状态写入 `detect_tasks`。后台 worker 使用 `FOR UPDATE SKIP LOCKED` 原子领取任务，执行完成后更新为 `completed` 或 `failed`。
+
+## YOLO 与 TensorRT
 
 默认 `INFERENCE_BACKEND=mock` 会生成稳定的模拟检测框，便于测试上传、任务、标注和导出流程。接入真实模型时安装可选依赖，并设置模型路径：
 
@@ -129,7 +158,7 @@ INFERENCE_BACKEND=ultralytics MODEL_PATH=/path/to/best.pt DEVICE=0 uv run uvicor
 参数说明：
 
 ```text
-INFERENCE_BACKEND=mock|ultralytics
+INFERENCE_BACKEND=mock|ultralytics|tensorrt
 MODEL_PATH=/path/to/best.pt
 DEVICE=0
 DATA_DIR=./data
@@ -138,7 +167,29 @@ RUN_TASKS_INLINE=false
 
 识别任务支持 `frame_stride` 和 `max_frames` 参数。`frame_stride=1` 表示视频逐帧处理，`max_frames` 留空表示处理全部抽取帧。
 
-RTX 3090 环境下建议先使用 `.pt` 权重跑通推理闭环，再按性能需求导出 ONNX 或 TensorRT engine。
+导出 TensorRT FP16 engine：
+
+```bash
+cd backend
+uv pip install -r requirements-gpu.txt
+uv run python scripts/export_tensorrt.py /path/to/best.pt --device 0 --imgsz 640
+```
+
+加载 TensorRT engine：
+
+```bash
+INFERENCE_BACKEND=tensorrt MODEL_PATH=/path/to/best.engine DEVICE=0 \
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+TensorRT engine 与构建机器的 GPU、CUDA 和 TensorRT 版本相关，建议直接在 RTX 3090 运行环境中生成。
+
+## 人工框选
+
+- 点击“选择”后拖动检测框可调整位置。
+- 选中检测框后拖动四角手柄可缩放。
+- 点击“新增框”后在图像上拖动可创建人工检测框。
+- 新增或修改的目标会标记为 `edited`，点击“保存”写入 PostgreSQL。
 
 ## API 概览
 
@@ -208,10 +259,10 @@ Compose 默认启动：
 
 ```text
 backend  -> http://localhost:8000
-frontend -> http://localhost:5173
+frontend -> http://localhost:4004
 ```
 
-当前 Compose 使用 `mock` 推理后端。真实 GPU 推理建议在宿主机或带 NVIDIA Runtime 的容器中单独配置。
+启动 Compose 前需在根目录环境中提供 `DATABASE_URL`。当前 Compose 使用 `mock` 推理后端；真实 TensorRT 推理建议在带 NVIDIA Container Runtime 的容器或宿主机中运行。
 
 ## 测试
 
@@ -230,8 +281,6 @@ uv run pytest
 
 ## 后续计划
 
-- 将本地 JSON 存储替换为 PostgreSQL。
-- 引入 Redis + Celery/RQ，避免长视频推理阻塞 API。
-- 增加画布式框选、拖拽和类别选择组件。
 - 增加数据集版本管理和训练集导出目录。
-- 接入 TensorRT FP16 推理加速。
+- 增加任务失败重试、超时回收和 worker 监控。
+- 增加 TensorRT 性能基准测试。

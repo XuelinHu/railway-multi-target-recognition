@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { Check, Download, Play, RefreshCw, Save, Upload, X } from "@lucide/vue";
+import { Check, Download, MousePointer2, Play, Plus, RefreshCw, Save, Upload, X } from "@lucide/vue";
 import {
   type AnnotationsDocument,
   type Asset,
@@ -26,6 +26,23 @@ const busy = ref(false);
 const message = ref("");
 const frameStride = ref(1);
 const maxFrames = ref<number | null>(null);
+const stageRef = ref<HTMLElement | null>(null);
+const editMode = ref<"select" | "add">("select");
+const selectedObjectIndex = ref<number | null>(null);
+
+type ResizeHandle = "nw" | "ne" | "sw" | "se";
+const resizeHandles: ResizeHandle[] = ["nw", "ne", "sw", "se"];
+type Interaction = {
+  mode: "move" | "resize" | "create";
+  pointerId: number;
+  objectIndex: number;
+  handle?: ResizeHandle;
+  startX: number;
+  startY: number;
+  original: { x: number; y: number; width: number; height: number };
+};
+
+const interaction = ref<Interaction | null>(null);
 
 const selectedAsset = computed(() => assets.value.find((asset) => asset.id === selectedAssetId.value) ?? null);
 const selectedFrame = computed(() => {
@@ -74,8 +91,7 @@ async function startDetection() {
       maxFrames.value || undefined,
     );
     task.value = nextTask;
-    const latestTask = await getTask(nextTask.id);
-    task.value = latestTask;
+    const latestTask = await waitForTask(nextTask.id);
     if (latestTask.status === "completed") {
       await loadAnnotations(latestTask.asset_id);
     }
@@ -91,6 +107,18 @@ async function pollTask() {
       await loadAnnotations(latestTask.asset_id);
     }
   }, "任务刷新失败");
+}
+
+async function waitForTask(taskId: string) {
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    const latestTask = await getTask(taskId);
+    task.value = latestTask;
+    if (latestTask.status === "completed" || latestTask.status === "failed") {
+      return latestTask;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+  }
+  throw new Error("任务等待超时");
 }
 
 async function loadAnnotations(assetId = selectedAssetId.value) {
@@ -131,12 +159,155 @@ function selectAsset(assetId: string) {
   annotations.value = null;
   selectedFrameIndex.value = 0;
   exportText.value = "";
+  selectedObjectIndex.value = null;
 }
 
 function markObject(index: number, status: "confirmed" | "edited" | "rejected") {
   const object = selectedFrame.value?.objects[index];
   if (!object) return;
   object.status = status;
+}
+
+function beginCanvasInteraction(event: PointerEvent) {
+  if (editMode.value !== "add" || !selectedFrame.value || !stageRef.value) return;
+  if ((event.target as HTMLElement).closest(".bbox")) return;
+  const point = framePoint(event);
+  if (!point) return;
+  const object = {
+    id: `obj_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`,
+    label: "new_target",
+    confidence: 1,
+    bbox: { x: point.x, y: point.y, width: 1, height: 1 },
+    track_id: null,
+    source: "manual" as const,
+    status: "edited" as const,
+  };
+  selectedFrame.value.objects.push(object);
+  const objectIndex = selectedFrame.value.objects.length - 1;
+  selectedObjectIndex.value = objectIndex;
+  interaction.value = {
+    mode: "create",
+    pointerId: event.pointerId,
+    objectIndex,
+    startX: point.x,
+    startY: point.y,
+    original: { ...object.bbox },
+  };
+  stageRef.value.setPointerCapture(event.pointerId);
+}
+
+function beginMove(event: PointerEvent, objectIndex: number) {
+  if (editMode.value !== "select") return;
+  const point = framePoint(event);
+  const object = selectedFrame.value?.objects[objectIndex];
+  if (!point || !object || !stageRef.value) return;
+  event.stopPropagation();
+  selectedObjectIndex.value = objectIndex;
+  interaction.value = {
+    mode: "move",
+    pointerId: event.pointerId,
+    objectIndex,
+    startX: point.x,
+    startY: point.y,
+    original: { ...object.bbox },
+  };
+  stageRef.value.setPointerCapture(event.pointerId);
+}
+
+function beginResize(event: PointerEvent, objectIndex: number, handle: ResizeHandle) {
+  const point = framePoint(event);
+  const object = selectedFrame.value?.objects[objectIndex];
+  if (!point || !object || !stageRef.value) return;
+  event.stopPropagation();
+  selectedObjectIndex.value = objectIndex;
+  interaction.value = {
+    mode: "resize",
+    pointerId: event.pointerId,
+    objectIndex,
+    handle,
+    startX: point.x,
+    startY: point.y,
+    original: { ...object.bbox },
+  };
+  stageRef.value.setPointerCapture(event.pointerId);
+}
+
+function updateInteraction(event: PointerEvent) {
+  const active = interaction.value;
+  const frame = selectedFrame.value;
+  const point = framePoint(event);
+  if (!active || !frame || !point) return;
+  const object = frame.objects[active.objectIndex];
+  if (!object) return;
+  const frameWidth = frame.width || 1;
+  const frameHeight = frame.height || 1;
+  const minSize = 4;
+  const dx = point.x - active.startX;
+  const dy = point.y - active.startY;
+
+  if (active.mode === "move") {
+    object.bbox.x = clamp(active.original.x + dx, 0, frameWidth - active.original.width);
+    object.bbox.y = clamp(active.original.y + dy, 0, frameHeight - active.original.height);
+  } else if (active.mode === "create") {
+    object.bbox.x = Math.min(active.startX, point.x);
+    object.bbox.y = Math.min(active.startY, point.y);
+    object.bbox.width = Math.max(Math.abs(point.x - active.startX), minSize);
+    object.bbox.height = Math.max(Math.abs(point.y - active.startY), minSize);
+  } else {
+    resizeObject(object.bbox, active, point.x, point.y, frameWidth, frameHeight, minSize);
+  }
+  object.status = "edited";
+}
+
+function endInteraction(event: PointerEvent) {
+  if (!interaction.value || !stageRef.value) return;
+  if (stageRef.value.hasPointerCapture(event.pointerId)) {
+    stageRef.value.releasePointerCapture(event.pointerId);
+  }
+  interaction.value = null;
+  if (editMode.value === "add") editMode.value = "select";
+}
+
+function framePoint(event: PointerEvent) {
+  const frame = selectedFrame.value;
+  const stage = stageRef.value;
+  if (!frame || !stage) return null;
+  const rect = stage.getBoundingClientRect();
+  return {
+    x: clamp(((event.clientX - rect.left) / rect.width) * (frame.width || 1), 0, frame.width || 1),
+    y: clamp(((event.clientY - rect.top) / rect.height) * (frame.height || 1), 0, frame.height || 1),
+  };
+}
+
+function resizeObject(
+  bbox: { x: number; y: number; width: number; height: number },
+  active: Interaction,
+  x: number,
+  y: number,
+  frameWidth: number,
+  frameHeight: number,
+  minSize: number,
+) {
+  const right = active.original.x + active.original.width;
+  const bottom = active.original.y + active.original.height;
+  if (active.handle?.includes("w")) {
+    bbox.x = clamp(x, 0, right - minSize);
+    bbox.width = right - bbox.x;
+  }
+  if (active.handle?.includes("e")) {
+    bbox.width = clamp(x - active.original.x, minSize, frameWidth - active.original.x);
+  }
+  if (active.handle?.includes("n")) {
+    bbox.y = clamp(y, 0, bottom - minSize);
+    bbox.height = bottom - bbox.y;
+  }
+  if (active.handle?.includes("s")) {
+    bbox.height = clamp(y - active.original.y, minSize, frameHeight - active.original.y);
+  }
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), Math.max(min, max));
 }
 
 async function runBusy(action: () => Promise<void>, fallback: string) {
@@ -220,6 +391,24 @@ async function runBusy(action: () => Promise<void>, fallback: string) {
             <Save :size="17" />
             保存
           </button>
+          <button
+            :class="{ active: editMode === 'select' }"
+            :disabled="!selectedFrame"
+            title="选择并拖动检测框"
+            @click="editMode = 'select'"
+          >
+            <MousePointer2 :size="17" />
+            选择
+          </button>
+          <button
+            :class="{ active: editMode === 'add' }"
+            :disabled="!selectedFrame"
+            title="在图像上拖动新增检测框"
+            @click="editMode = 'add'"
+          >
+            <Plus :size="17" />
+            新增框
+          </button>
           <button :disabled="!annotations || busy" @click="review('approved')">
             <Check :size="17" />
             通过
@@ -251,20 +440,37 @@ async function runBusy(action: () => Promise<void>, fallback: string) {
           </div>
 
           <div class="preview-area">
-            <div v-if="selectedFrame && frameImage" class="image-stage">
-              <img :src="frameImage" alt="frame" />
+            <div
+              v-if="selectedFrame && frameImage"
+              ref="stageRef"
+              :class="['image-stage', { drawing: editMode === 'add' }]"
+              @pointerdown="beginCanvasInteraction"
+              @pointermove="updateInteraction"
+              @pointerup="endInteraction"
+              @pointercancel="endInteraction"
+            >
+              <img :src="frameImage" alt="frame" draggable="false" />
               <div
-                v-for="object in selectedFrameObjects"
+                v-for="(object, objectIndex) in selectedFrameObjects"
                 :key="object.id"
-                class="bbox"
+                :class="['bbox', { selected: objectIndex === selectedObjectIndex }]"
                 :style="{
                   left: `${(object.bbox.x / (selectedFrame.width || 1)) * 100}%`,
                   top: `${(object.bbox.y / (selectedFrame.height || 1)) * 100}%`,
                   width: `${(object.bbox.width / (selectedFrame.width || 1)) * 100}%`,
                   height: `${(object.bbox.height / (selectedFrame.height || 1)) * 100}%`,
                 }"
+                @pointerdown="beginMove($event, objectIndex)"
               >
                 <span>{{ object.label }} {{ Math.round(object.confidence * 100) }}%</span>
+                <template v-if="objectIndex === selectedObjectIndex">
+                  <i
+                    v-for="handle in resizeHandles"
+                    :key="handle"
+                    :class="['resize-handle', handle]"
+                    @pointerdown="beginResize($event, objectIndex, handle)"
+                  />
+                </template>
               </div>
             </div>
             <div v-else class="empty-state">上传资源并执行自动标注后显示帧图</div>
@@ -277,7 +483,12 @@ async function runBusy(action: () => Promise<void>, fallback: string) {
               <span>状态</span>
               <span>操作</span>
             </div>
-            <div v-for="(object, index) in selectedFrameObjects" :key="object.id" class="table-row">
+            <div
+              v-for="(object, index) in selectedFrameObjects"
+              :key="object.id"
+              :class="['table-row', { selected: index === selectedObjectIndex }]"
+              @click="selectedObjectIndex = index"
+            >
               <input v-model="object.label" @change="markObject(index, 'edited')" />
               <span>{{ object.confidence.toFixed(3) }}</span>
               <select v-model="object.status">

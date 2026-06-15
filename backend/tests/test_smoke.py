@@ -11,6 +11,7 @@ from app.main import create_app
 
 def test_upload_detect_edit_and_export(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'test.db'}")
     monkeypatch.setenv("INFERENCE_BACKEND", "mock")
     monkeypatch.setenv("RUN_TASKS_INLINE", "true")
     get_settings.cache_clear()
@@ -83,6 +84,7 @@ def test_video_upload_extracts_frames_and_detects(monkeypatch, tmp_path):
     import numpy as np
 
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'test.db'}")
     monkeypatch.setenv("INFERENCE_BACKEND", "mock")
     monkeypatch.setenv("RUN_TASKS_INLINE", "true")
     get_settings.cache_clear()
@@ -122,3 +124,32 @@ def test_video_upload_extracts_frames_and_detects(monkeypatch, tmp_path):
     assert [frame["frame_index"] for frame in annotations["frames"]] == [0, 1, 2]
     assert all(frame["objects"] for frame in annotations["frames"])
     assert client.get(annotations["frames"][1]["image_url"]).status_code == 200
+
+
+def test_database_queue_claims_queued_task(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'queue.db'}")
+    monkeypatch.setenv("INFERENCE_BACKEND", "mock")
+    monkeypatch.setenv("RUN_TASKS_INLINE", "false")
+    monkeypatch.setenv("TASK_WORKER_ENABLED", "false")
+    get_settings.cache_clear()
+    get_store.cache_clear()
+
+    image = Image.new("RGB", (160, 90), color="white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+
+    client = TestClient(create_app())
+    upload = client.post(
+        "/api/assets/upload",
+        files={"file": ("queued.png", buffer.getvalue(), "image/png")},
+    )
+    asset = upload.json()
+    response = client.post("/api/tasks/detect", json={"asset_id": asset["id"]})
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+
+    claimed = get_store().claim_next_task()
+    assert claimed is not None
+    assert claimed.id == response.json()["id"]
+    assert claimed.status == "running"

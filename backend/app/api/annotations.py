@@ -2,14 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.dependencies import get_store
 from app.models.schemas import AnnotationsDocument, ReviewRequest, now_utc
-from app.repositories.json_store import JsonStore
+from app.repositories.postgres_store import PostgresStore
 
 
 router = APIRouter(prefix="/api/assets", tags=["annotations"])
 
 
 @router.get("/{asset_id}/annotations", response_model=AnnotationsDocument)
-def get_annotations(asset_id: str, store: JsonStore = Depends(get_store)) -> AnnotationsDocument:
+def get_annotations(asset_id: str, store: PostgresStore = Depends(get_store)) -> AnnotationsDocument:
     annotations = store.get_annotations(asset_id)
     if annotations is None:
         raise HTTPException(status_code=404, detail="annotations not found")
@@ -20,7 +20,7 @@ def get_annotations(asset_id: str, store: JsonStore = Depends(get_store)) -> Ann
 def save_annotations(
     asset_id: str,
     annotations: AnnotationsDocument,
-    store: JsonStore = Depends(get_store),
+    store: PostgresStore = Depends(get_store),
 ) -> AnnotationsDocument:
     if store.get_asset(asset_id) is None:
         raise HTTPException(status_code=404, detail="asset not found")
@@ -34,7 +34,7 @@ def save_annotations(
 def review_annotations(
     asset_id: str,
     review: ReviewRequest,
-    store: JsonStore = Depends(get_store),
+    store: PostgresStore = Depends(get_store),
 ) -> AnnotationsDocument:
     annotations = store.get_annotations(asset_id)
     if annotations is None:

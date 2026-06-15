@@ -1,9 +1,9 @@
 from app.models.schemas import AnnotationsDocument
-from app.repositories.json_store import JsonStore
+from app.repositories.postgres_store import PostgresStore
 
 
 class ExportService:
-    def __init__(self, store: JsonStore) -> None:
+    def __init__(self, store: PostgresStore) -> None:
         self.store = store
 
     def get_annotations(self, asset_id: str) -> AnnotationsDocument | None:

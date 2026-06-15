@@ -23,7 +23,7 @@ class InferenceService:
 
     @property
     def model_name(self) -> str:
-        if self.settings.inference_backend == "ultralytics":
+        if self.settings.inference_backend in {"ultralytics", "tensorrt"}:
             return Path(self.settings.model_path).name if self.settings.model_path else "ultralytics-default"
         return "mock"
 
@@ -33,7 +33,7 @@ class InferenceService:
             frame_stride=request.frame_stride,
             max_frames=request.max_frames,
         )
-        if self.settings.inference_backend == "ultralytics":
+        if self.settings.inference_backend in {"ultralytics", "tensorrt"}:
             return self._predict_ultralytics(asset, request, frames)
         return self._predict_mock(asset, frames)
 
@@ -126,6 +126,11 @@ class InferenceService:
         except Exception as exc:
             raise RuntimeError("ultralytics is not installed in this Python environment") from exc
 
+        if self.settings.inference_backend == "tensorrt":
+            if not self.settings.model_path:
+                raise RuntimeError("MODEL_PATH must point to a TensorRT .engine file")
+            if Path(self.settings.model_path).suffix != ".engine":
+                raise RuntimeError("TensorRT inference requires a .engine MODEL_PATH")
         model_path = self.settings.model_path or "yolo11n.pt"
         self._model = YOLO(model_path)
         return self._model

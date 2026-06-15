@@ -1,10 +1,10 @@
 from app.models.schemas import DetectTask, DetectionRequest, now_utc
-from app.repositories.json_store import JsonStore
+from app.repositories.postgres_store import PostgresStore
 from app.services.inference_service import InferenceService
 
 
 class TaskService:
-    def __init__(self, store: JsonStore, inference: InferenceService) -> None:
+    def __init__(self, store: PostgresStore, inference: InferenceService) -> None:
         self.store = store
         self.inference = inference
 
@@ -16,8 +16,8 @@ class TaskService:
         )
         return self.store.create_task(task)
 
-    def run_detection(self, task_id: str) -> None:
-        task = self.store.get_task(task_id)
+    def run_detection(self, task_id: str, claimed_task: DetectTask | None = None) -> None:
+        task = claimed_task or self.store.get_task(task_id)
         if task is None:
             return
 
@@ -30,10 +30,11 @@ class TaskService:
             return
 
         try:
-            task.status = "running"
-            task.progress = 0.1
-            task.started_at = now_utc()
-            self.store.update_task(task)
+            if claimed_task is None:
+                task.status = "running"
+                task.progress = 0.1
+                task.started_at = now_utc()
+                self.store.update_task(task)
 
             annotations = self.inference.predict(asset, task.params)
             self.store.save_annotations(annotations)

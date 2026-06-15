@@ -1,13 +1,35 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import annotations, assets, export, tasks
 from app.core.config import get_settings
+from app.core.dependencies import get_store, get_task_service
+from app.services.task_worker import DatabaseTaskWorker
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title=settings.app_name)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        worker = None
+        if settings.task_worker_enabled and not settings.run_tasks_inline:
+            worker = DatabaseTaskWorker(
+                get_store(),
+                get_task_service(),
+                settings.task_poll_interval_seconds,
+            )
+            worker.start()
+        try:
+            yield
+        finally:
+            if worker is not None:
+                worker.stop()
+            get_store().close()
+
+    app = FastAPI(title=settings.app_name, lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
@@ -22,7 +44,12 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "inference_backend": settings.inference_backend}
+        database_status = "ok" if get_store().healthcheck() else "unavailable"
+        return {
+            "status": "ok",
+            "database": database_status,
+            "inference_backend": settings.inference_backend,
+        }
 
     return app
 

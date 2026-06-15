@@ -41,6 +41,12 @@ button:disabled {
   opacity: 0.55;
 }
 
+button.active {
+  border-color: #3976b7;
+  color: #1f5f9f;
+  background: #eef6ff;
+}
+
 .app-shell {
   min-height: 100vh;
   display: flex;
@@ -298,6 +304,12 @@ button:disabled {
   overflow: hidden;
   border-radius: 6px;
   background: #111820;
+  touch-action: none;
+  user-select: none;
+}
+
+.image-stage.drawing {
+  cursor: crosshair;
 }
 
 .image-stage img {
@@ -311,7 +323,13 @@ button:disabled {
   position: absolute;
   border: 2px solid #1fbf75;
   background: rgb(31 191 117 / 10%);
-  pointer-events: none;
+  cursor: move;
+  touch-action: none;
+}
+
+.bbox.selected {
+  border-color: #1976d2;
+  background: rgb(25 118 210 / 12%);
 }
 
 .bbox span {
@@ -328,6 +346,40 @@ button:disabled {
   line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
+  pointer-events: none;
+}
+
+.resize-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border: 1px solid #ffffff;
+  border-radius: 2px;
+  background: #1976d2;
+}
+
+.resize-handle.nw {
+  top: -6px;
+  left: -6px;
+  cursor: nwse-resize;
+}
+
+.resize-handle.ne {
+  top: -6px;
+  right: -6px;
+  cursor: nesw-resize;
+}
+
+.resize-handle.sw {
+  bottom: -6px;
+  left: -6px;
+  cursor: nesw-resize;
+}
+
+.resize-handle.se {
+  right: -6px;
+  bottom: -6px;
+  cursor: nwse-resize;
 }
 
 .empty-state {
@@ -373,6 +425,10 @@ button:disabled {
 .table-row span {
   color: #4d5a66;
   font-size: 13px;
+}
+
+.table-row.selected {
+  background: #eef6ff;
 }
 
 .row-actions {

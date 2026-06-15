@@ -7,8 +7,10 @@ services:
              uvicorn app.main:app --host 0.0.0.0 --port 8000"
     environment:
       DATA_DIR: /app/data
+      DATABASE_URL: ${DATABASE_URL}
       INFERENCE_BACKEND: mock
-      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      TASK_WORKER_ENABLED: "true"
+      CORS_ORIGINS: http://localhost:4004,http://127.0.0.1:4004
     ports:
       - "8000:8000"
     volumes:
@@ -19,11 +21,11 @@ services:
     working_dir: /app/frontend
     command: >
       sh -c "npm install &&
-             npm run dev -- --host 0.0.0.0"
+             npm run dev -- --host 0.0.0.0 --port 4004"
     environment:
       VITE_API_BASE_URL: http://localhost:8000
     ports:
-      - "5173:5173"
+      - "4004:4004"
     volumes:
       - .:/app
     depends_on:
