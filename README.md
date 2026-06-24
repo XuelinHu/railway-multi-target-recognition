@@ -18,7 +18,7 @@
 - 图片、视频资源上传与基础元数据提取。
 - 图片统一保存为第 0 帧，视频按 `frame_stride` 逐帧抽取并保存帧图。
 - FastAPI 任务接口，支持创建识别任务、查询任务状态。
-- 可替换推理层，默认 `mock` 后端用于本地冒烟测试。
+- 默认使用 GPU 上的 `yolo11n.pt` 通用 COCO 检测模型；`mock` 仅用于自动化测试。
 - 可选 Ultralytics YOLO 推理后端，用于接入真实 GPU 权重。
 - PostgreSQL 持久化资产、任务、标注和人工校验状态。
 - PostgreSQL 任务表作为推理队列，使用行锁领取任务，不依赖 Redis。
@@ -77,7 +77,7 @@ scripts/
 cd backend
 uv sync --dev
 cp .env.example .env
-uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8010
 ```
 
 前端：
@@ -92,23 +92,23 @@ npm run dev
 
 ```text
 Frontend: http://localhost:4004
-Backend:  http://localhost:8000
-API Docs: http://localhost:8000/docs
+Backend:  http://localhost:8010
+API Docs: http://localhost:8010/docs
 ```
 
 FRP 映射时保持内网端口不变：
 
-按 `frp` skill 的端口范围，前端使用本机 `4000-4010`，后端使用本机 `8000-8010`。例如本项目使用本地前端 `4004`、本地后端 `8000`：
+按 `frp` skill 的端口范围，前端使用本机 `4000-4010`，后端使用本机 `8000-8010`。本项目使用本地前端 `4004`、本地后端 `8010`：
 
 ```bash
-VITE_API_BASE_URL=http://47.120.48.245:18000 npm run dev -- --host 0.0.0.0 --port 4004
+VITE_API_BASE_URL=http://47.120.48.245:18010 npm run dev -- --host 0.0.0.0 --port 4004
 ```
 
 对应外网地址：
 
 ```text
 Frontend: http://47.120.48.245:14004
-Backend:  http://47.120.48.245:18000
+Backend:  http://47.120.48.245:18010
 ```
 
 后端跨域放行前端地址：
@@ -146,13 +146,13 @@ TASK_POLL_INTERVAL_SECONDS=1
 
 ## YOLO 与 TensorRT
 
-默认 `INFERENCE_BACKEND=mock` 会生成稳定的模拟检测框，便于测试上传、任务、标注和导出流程。接入真实模型时安装可选依赖，并设置模型路径：
+生产配置默认使用 `INFERENCE_BACKEND=ultralytics`、`MODEL_PATH=./yolo11n.pt` 和 `DEVICE=0`，提供 COCO 通用目标检测能力。`INFERENCE_BACKEND=mock` 只用于测试。
 
 ```bash
 cd backend
 uv sync --dev
 uv pip install -r requirements-gpu.txt
-INFERENCE_BACKEND=ultralytics MODEL_PATH=/path/to/best.pt DEVICE=0 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+INFERENCE_BACKEND=ultralytics MODEL_PATH=./yolo11n.pt DEVICE=0 uv run uvicorn app.main:app --host 0.0.0.0 --port 8010
 ```
 
 参数说明：
@@ -179,7 +179,7 @@ uv run python scripts/export_tensorrt.py /path/to/best.pt --device 0 --imgsz 640
 
 ```bash
 INFERENCE_BACKEND=tensorrt MODEL_PATH=/path/to/best.engine DEVICE=0 \
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8010
 ```
 
 TensorRT engine 与构建机器的 GPU、CUDA 和 TensorRT 版本相关，建议直接在 RTX 3090 运行环境中生成。
@@ -216,7 +216,7 @@ GET  /api/assets/{asset_id}/export?format=json|coco|yolo
 {
   "asset_id": "asset_xxx",
   "type": "image",
-  "model": "mock",
+  "model": "yolo11n",
   "review_status": "pending_review",
   "frames": [
     {
@@ -229,7 +229,7 @@ GET  /api/assets/{asset_id}/export?format=json|coco|yolo
       "objects": [
         {
           "id": "obj_xxx",
-          "label": "railway_target",
+          "label": "person",
           "confidence": 0.88,
           "bbox": {
             "x": 224,
@@ -258,7 +258,7 @@ docker compose up --build
 Compose 默认启动：
 
 ```text
-backend  -> http://localhost:8000
+backend  -> http://localhost:8010
 frontend -> http://localhost:4004
 ```
 

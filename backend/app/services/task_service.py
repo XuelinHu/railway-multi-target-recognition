@@ -12,7 +12,7 @@ class TaskService:
         task = DetectTask(
             asset_id=request.asset_id,
             params=request,
-            model_name=self.inference.model_name,
+            model_name=request.model_name or self.inference.model_name,
         )
         return self.store.create_task(task)
 

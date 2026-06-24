@@ -12,7 +12,7 @@ services:
       TASK_WORKER_ENABLED: "true"
       CORS_ORIGINS: http://localhost:4004,http://127.0.0.1:4004
     ports:
-      - "8000:8000"
+      - "8010:8000"
     volumes:
       - .:/app
 
@@ -23,7 +23,7 @@ services:
       sh -c "npm install &&
              npm run dev -- --host 0.0.0.0 --port 4004"
     environment:
-      VITE_API_BASE_URL: http://localhost:8000
+      VITE_API_BASE_URL: http://localhost:8010
     ports:
       - "4004:4004"
     volumes:

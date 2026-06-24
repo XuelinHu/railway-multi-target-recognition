@@ -1,126 +1,219 @@
-export type Asset = {
-  id: string;
-  filename: string;
-  content_type: string;
-  type: "image" | "video" | "unknown";
-  path: string;
-  size_bytes: number;
+export type ImageTaskType = "detection" | "segmentation" | "pose" | "classification" | "caption";
+export type ImageTaskStatus = "idle" | "pending" | "processing" | "success" | "failed";
+
+export type ImageAsset = {
+  imageId: string;
+  imageUrl: string;
+  originalName: string;
+  fileName: string;
+  fileUrl: string;
+  filePath?: string;
+  mimeType?: string | null;
+  fileSize: number;
   width?: number | null;
   height?: number | null;
-  duration_ms?: number | null;
-  fps?: number | null;
-  created_at: string;
+  sessionId?: string;
+  createdAt: string;
+  updatedAt?: string;
+  hasCurrentTaskResult: boolean;
+  taskStatus: ImageTaskStatus;
 };
 
-export type DetectTask = {
-  id: string;
-  asset_id: string;
-  status: "queued" | "running" | "completed" | "failed";
-  progress: number;
-  model_name: string;
-  error?: string | null;
+export type ImageHistoryData = {
+  records: ImageAsset[];
+  total: number;
 };
 
-export type AnnotationsDocument = {
-  asset_id: string;
-  type: "image" | "video" | "unknown";
-  model: string;
-  review_status: "pending_review" | "in_review" | "approved" | "rejected";
-  frames: Array<{
-    frame_index: number;
-    timestamp_ms: number;
-    width?: number | null;
-    height?: number | null;
-    image_url?: string | null;
-    review_status: "pending_review" | "in_review" | "approved" | "rejected";
-    objects: Array<{
-      id: string;
-      label: string;
-      confidence: number;
-      bbox: { x: number; y: number; width: number; height: number };
-      track_id?: number | null;
-      source: "auto" | "manual";
-      status: "auto" | "confirmed" | "edited" | "rejected";
-    }>;
-  }>;
-  updated_at: string;
-  reviewed_at?: string | null;
+export type ImageTask = {
+  taskId: string;
+  imageId: string;
+  taskType: ImageTaskType;
+  status: ImageTaskStatus;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+export type ImageTaskResult = {
+  resultId?: string;
+  taskId: string;
+  imageId: string;
+  taskType: ImageTaskType;
+  status: ImageTaskStatus;
+  resultImageUrl?: string;
+  resultImagePath?: string;
+  resultJson?: Record<string, unknown> | null;
+  annotationJson?: Record<string, unknown> | null;
+  descriptionText?: string;
+  source?: "ai" | "manual" | "edited";
+  modelId?: string;
+  latestVersionId?: string | null;
+  latestVersionNo?: number | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, init);
+export type ImageTaskResultVersion = {
+  versionId: string;
+  resultId: string;
+  taskId: string;
+  imageId: string;
+  taskType: ImageTaskType;
+  versionNo: number;
+  source: "ai" | "manual" | "edited";
+  modelId?: string;
+  resultImageUrl?: string;
+  resultImagePath?: string;
+  resultJson?: Record<string, unknown> | null;
+  annotationJson?: Record<string, unknown> | null;
+  descriptionText?: string;
+  createdAt: string;
+};
+
+export type ApiEnvelope<T> = {
+  code: number;
+  message: string;
+  data: T;
+};
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8010";
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, options);
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || response.statusText);
+    let detail = response.statusText;
+    try {
+      const payload = await response.json();
+      const rawDetail = payload.detail ?? payload.message ?? payload;
+      detail = typeof rawDetail === "string" ? rawDetail : JSON.stringify(rawDetail);
+    } catch {
+      detail = await response.text();
+    }
+    throw new Error(detail || `HTTP ${response.status}`);
   }
   return response.json() as Promise<T>;
 }
 
-export async function uploadAsset(file: File): Promise<Asset> {
-  const body = new FormData();
-  body.append("file", file);
-  return request<Asset>("/api/assets/upload", {
-    method: "POST",
-    body,
-  });
+async function apiData<T>(path: string, options?: RequestInit): Promise<T> {
+  const payload = await request<ApiEnvelope<T>>(path, options);
+  return payload.data;
 }
 
-export function listAssets(): Promise<Asset[]> {
-  return request<Asset[]>("/api/assets");
+export function uploadImage(file: File, taskType: ImageTaskType, sessionId: string): Promise<ImageAsset> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("taskType", taskType);
+  form.append("sessionId", sessionId);
+  return apiData<ImageAsset>("/api/images/upload", { method: "POST", body: form });
 }
 
-export function createDetectionTask(assetId: string, frameStride = 1, maxFrames?: number): Promise<DetectTask> {
-  return request<DetectTask>("/api/tasks/detect", {
+export function listImages(params: {
+  taskType?: ImageTaskType;
+  page?: number;
+  pageSize?: number;
+  sessionId: string;
+}): Promise<ImageHistoryData> {
+  const query = new URLSearchParams();
+  if (params.taskType) query.set("taskType", params.taskType);
+  query.set("page", String(params.page ?? 1));
+  query.set("pageSize", String(params.pageSize ?? 50));
+  query.set("sessionId", params.sessionId);
+  return apiData<ImageHistoryData>(`/api/images/list?${query.toString()}`);
+}
+
+export function createImageTask(data: {
+  imageId: string;
+  taskType: ImageTaskType;
+  sessionId: string;
+}): Promise<ImageTask> {
+  return apiData<ImageTask>("/api/image-tasks/create", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      asset_id: assetId,
-      confidence: 0.25,
-      iou: 0.7,
-      frame_stride: frameStride,
-      max_frames: maxFrames || undefined,
-    }),
+    body: JSON.stringify(data),
   });
 }
 
-export function getTask(taskId: string): Promise<DetectTask> {
-  return request<DetectTask>(`/api/tasks/${taskId}`);
+export function saveTaskResult(data: {
+  taskId: string;
+  imageId: string;
+  taskType: ImageTaskType;
+  resultImageUrl?: string;
+  resultJson?: Record<string, unknown> | null;
+  annotationJson?: Record<string, unknown> | null;
+  descriptionText?: string;
+  source?: "ai" | "manual" | "edited";
+  modelId?: string;
+}): Promise<{ resultId: string; versionId: string; versionNo: number }> {
+  return apiData<{ resultId: string; versionId: string; versionNo: number }>("/api/image-tasks/result/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
 }
 
-export function getAnnotations(assetId: string): Promise<AnnotationsDocument> {
-  return request<AnnotationsDocument>(`/api/assets/${assetId}/annotations`);
+export function getTaskResult(params: {
+  imageId: string;
+  taskType: ImageTaskType;
+  sessionId: string;
+}): Promise<ImageTaskResult | null> {
+  const query = new URLSearchParams({
+    imageId: params.imageId,
+    taskType: params.taskType,
+    sessionId: params.sessionId,
+  });
+  return apiData<ImageTaskResult | null>(`/api/image-tasks/result?${query.toString()}`);
 }
 
-export function saveAnnotations(assetId: string, annotations: AnnotationsDocument): Promise<AnnotationsDocument> {
-  return request<AnnotationsDocument>(`/api/assets/${assetId}/annotations`, {
+export function listTaskResultVersions(params: {
+  imageId: string;
+  taskType: ImageTaskType;
+  sessionId: string;
+}): Promise<ImageTaskResultVersion[]> {
+  const query = new URLSearchParams({
+    imageId: params.imageId,
+    taskType: params.taskType,
+    sessionId: params.sessionId,
+  });
+  return apiData<ImageTaskResultVersion[]>(`/api/image-tasks/result/versions?${query.toString()}`);
+}
+
+export function getTaskResultVersion(versionId: string): Promise<ImageTaskResultVersion> {
+  return apiData<ImageTaskResultVersion>(`/api/image-tasks/result/version/${versionId}`);
+}
+
+export function restoreTaskResultVersion(versionId: string): Promise<ImageTaskResult> {
+  return apiData<ImageTaskResult>(`/api/image-tasks/result/version/${versionId}/restore`, {
+    method: "POST",
+  });
+}
+
+export function updateAnnotation(data: {
+  taskId: string;
+  imageId: string;
+  taskType: ImageTaskType;
+  annotationJson: Record<string, unknown>;
+}): Promise<ImageTaskResult> {
+  return apiData<ImageTaskResult>("/api/image-tasks/annotation", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(annotations),
+    body: JSON.stringify(data),
   });
 }
 
-export function reviewAnnotations(
-  assetId: string,
-  status: "pending_review" | "in_review" | "approved" | "rejected",
-): Promise<AnnotationsDocument> {
-  return request<AnnotationsDocument>(`/api/assets/${assetId}/annotations/review`, {
+export function inferImageTask(data: {
+  imageId: string;
+  taskType: ImageTaskType;
+  sessionId: string;
+  modelName?: string;
+}): Promise<ImageTaskResult> {
+  return apiData<ImageTaskResult>("/api/ai/infer", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(data),
   });
 }
 
-export function frameImageUrl(path?: string | null): string {
+export function assetUrl(path?: string | null): string {
   if (!path) return "";
+  if (/^https?:\/\//.test(path)) return path;
   return `${API_BASE_URL}${path}`;
-}
-
-export async function exportAnnotations(assetId: string, format: "json" | "coco" | "yolo"): Promise<string> {
-  const response = await fetch(`${API_BASE_URL}/api/assets/${assetId}/export?format=${format}`);
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  return response.text();
 }

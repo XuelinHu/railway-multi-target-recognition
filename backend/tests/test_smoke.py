@@ -7,6 +7,7 @@ from PIL import Image
 from app.core.config import get_settings
 from app.core.dependencies import get_store
 from app.main import create_app
+from app.api.ai import _result_from_analysis
 
 
 def test_upload_detect_edit_and_export(monkeypatch, tmp_path):
@@ -153,3 +154,26 @@ def test_database_queue_claims_queued_task(monkeypatch, tmp_path):
     assert claimed is not None
     assert claimed.id == response.json()["id"]
     assert claimed.status == "running"
+
+
+def test_real_vision_result_keeps_general_model_labels():
+    result = _result_from_analysis(
+        "detection",
+        {
+            "objects": [
+                {
+                    "label": "person",
+                    "confidence": 0.91,
+                    "bbox": {"x": 10, "y": 20, "width": 30, "height": 40},
+                },
+                {
+                    "label": "car",
+                    "confidence": 0.82,
+                    "bbox": {"x": 50, "y": 60, "width": 70, "height": 80},
+                },
+            ]
+        },
+    )
+
+    assert [box["label"] for box in result["boxes"]] == ["person", "car"]
+    assert all(box["label"] != "railway_target" for box in result["boxes"])

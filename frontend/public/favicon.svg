@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Railway recognition">
+  <rect width="64" height="64" rx="14" fill="#17202a"/>
+  <path d="M16 18c0-4 3-7 7-7h18c4 0 7 3 7 7v23c0 4-3 7-7 7H23c-4 0-7-3-7-7V18Z" fill="#f8fafc"/>
+  <path d="M22 19h20v10H22V19Z" fill="#286eac"/>
+  <path d="M22 35h7m6 0h7" stroke="#17202a" stroke-width="4" stroke-linecap="round"/>
+  <path d="M23 48 15 58m26-10 8 10M21 54h22" stroke="#ffb000" stroke-width="4" stroke-linecap="round"/>
+  <path d="M11 11h16v16H11V11Zm26 26h16v16H37V37Z" fill="none" stroke="#20a57a" stroke-width="3" stroke-linejoin="round"/>
+</svg>

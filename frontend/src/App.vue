@@ -1,527 +1,730 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
-import { Check, Download, MousePointer2, Play, Plus, RefreshCw, Save, Upload, X } from "@lucide/vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import {
-  type AnnotationsDocument,
-  type Asset,
-  type DetectTask,
-  createDetectionTask,
-  exportAnnotations,
-  frameImageUrl,
-  getAnnotations,
-  getTask,
-  listAssets,
-  reviewAnnotations,
-  saveAnnotations,
-  uploadAsset,
+  Boxes,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Image as ImageIcon,
+  Loader2,
+  Maximize2,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Sparkles,
+  Upload,
+  ZoomIn,
+} from "@lucide/vue";
+import {
+  type ImageAsset,
+  type ImageTaskResult,
+  type ImageTaskResultVersion,
+  type ImageTaskStatus,
+  type ImageTaskType,
+  assetUrl,
+  createImageTask,
+  getTaskResult,
+  getTaskResultVersion,
+  inferImageTask,
+  listTaskResultVersions,
+  listImages,
+  restoreTaskResultVersion,
+  saveTaskResult,
+  updateAnnotation,
+  uploadImage,
 } from "./api";
 
-const assets = ref<Asset[]>([]);
-const selectedAssetId = ref("");
-const task = ref<DetectTask | null>(null);
-const annotations = ref<AnnotationsDocument | null>(null);
-const selectedFrameIndex = ref(0);
-const exportText = ref("");
-const busy = ref(false);
-const message = ref("");
-const frameStride = ref(1);
-const maxFrames = ref<number | null>(null);
-const stageRef = ref<HTMLElement | null>(null);
-const editMode = ref<"select" | "add">("select");
-const selectedObjectIndex = ref<number | null>(null);
-
-type ResizeHandle = "nw" | "ne" | "sw" | "se";
-const resizeHandles: ResizeHandle[] = ["nw", "ne", "sw", "se"];
-type Interaction = {
-  mode: "move" | "resize" | "create";
-  pointerId: number;
-  objectIndex: number;
-  handle?: ResizeHandle;
-  startX: number;
-  startY: number;
-  original: { x: number; y: number; width: number; height: number };
+type TaskConfig = {
+  type: ImageTaskType;
+  title: string;
+  description: string;
+  models: string[];
 };
 
-const interaction = ref<Interaction | null>(null);
+type TaskState = {
+  currentImageId: string | null;
+  imageUrl: string;
+  imageInfo: ImageAsset | null;
+  taskId: string | null;
+  resultImageUrl: string;
+  resultJson: Record<string, unknown> | null;
+  annotationJson: Record<string, unknown> | null;
+  descriptionText: string;
+  status: ImageTaskStatus;
+  versions: ImageTaskResultVersion[];
+  activeVersionId: string | null;
+  latestVersionNo: number | null;
+  isViewingHistory: boolean;
+};
 
-const selectedAsset = computed(() => assets.value.find((asset) => asset.id === selectedAssetId.value) ?? null);
-const selectedFrame = computed(() => {
-  if (!annotations.value) return null;
-  return annotations.value.frames[selectedFrameIndex.value] ?? annotations.value.frames[0] ?? null;
+const taskConfigs: TaskConfig[] = [
+  {
+    type: "detection",
+    title: "目标检测",
+    description: "检测框、类别与置信度",
+    models: ["yolo11n", "yolov8n"],
+  },
+  {
+    type: "segmentation",
+    title: "实例分割",
+    description: "区域 mask、轮廓与类别",
+    models: ["yolo11n-seg"],
+  },
+  {
+    type: "pose",
+    title: "姿态识别",
+    description: "关键点与骨架连线",
+    models: ["yolo11n-pose"],
+  },
+  {
+    type: "classification",
+    title: "图像分类",
+    description: "分类标签与概率",
+    models: ["yolo11n-cls"],
+  },
+  {
+    type: "caption",
+    title: "图像描述",
+    description: "生成图片描述文本",
+    models: ["blip-image-captioning-base", "yolo-cls-fallback"],
+  },
+];
+
+const currentTaskType = ref<ImageTaskType>("detection");
+const selectedModelByTask = reactive<Record<ImageTaskType, string>>({
+  detection: "yolo11n",
+  segmentation: "yolo11n-seg",
+  pose: "yolo11n-pose",
+  classification: "yolo11n-cls",
+  caption: "blip-image-captioning-base",
 });
-const selectedFrameObjects = computed(() => selectedFrame.value?.objects ?? []);
-const frameImage = computed(() => frameImageUrl(selectedFrame.value?.image_url));
+const imageHistoryList = ref<ImageAsset[]>([]);
+const loading = ref(false);
+const message = ref("");
+const historyCollapsed = ref(false);
+const thumbnailCollapsed = ref(false);
+const originalPreview = ref<ImageAsset | null>(null);
 
-onMounted(() => {
-  refreshAssets();
+const sessionId = getSessionId();
+const taskStates = reactive<Record<ImageTaskType, TaskState>>({
+  detection: createDefaultTaskState(),
+  segmentation: createDefaultTaskState(),
+  pose: createDefaultTaskState(),
+  classification: createDefaultTaskState(),
+  caption: createDefaultTaskState(),
 });
 
-async function refreshAssets() {
-  runBusy(async () => {
-    const data = await listAssets();
-    assets.value = data;
-    if (!selectedAssetId.value && data.length > 0) {
-      selectedAssetId.value = data[0].id;
-    }
-  }, "资源加载失败");
+const currentState = computed(() => taskStates[currentTaskType.value]);
+const currentConfig = computed(() => taskConfigs.find((item) => item.type === currentTaskType.value) ?? taskConfigs[0]);
+const currentImageUrl = computed(() => assetUrl(currentState.value.imageUrl));
+
+const view = reactive({ zoom: 1, x: 0, y: 0, dragging: false, startX: 0, startY: 0, originX: 0, originY: 0 });
+
+onMounted(async () => {
+  await loadImageHistory();
+  const first = imageHistoryList.value[0];
+  if (first) await selectImage(first);
+});
+
+async function setTaskType(taskType: ImageTaskType) {
+  currentTaskType.value = taskType;
+  message.value = "";
+  await loadImageHistory();
+  const state = currentState.value;
+  if (!state.currentImageId && imageHistoryList.value[0]) {
+    await selectImage(imageHistoryList.value[0]);
+  }
 }
 
-async function onFileChange(event: Event) {
+async function handleUpload(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
-  if (!file) return;
-  await runBusy(async () => {
-    const asset = await uploadAsset(file);
-    assets.value = [asset, ...assets.value.filter((item) => item.id !== asset.id)];
-    selectedAssetId.value = asset.id;
-    annotations.value = null;
-    exportText.value = "";
-    selectedFrameIndex.value = 0;
-    message.value = "上传完成";
-  }, "上传失败");
   input.value = "";
-}
+  if (!file) return;
 
-async function startDetection() {
-  if (!selectedAssetId.value) return;
+  const error = validateImage(file);
+  if (error) {
+    message.value = error;
+    return;
+  }
+
   await runBusy(async () => {
-    const nextTask = await createDetectionTask(
-      selectedAssetId.value,
-      frameStride.value,
-      maxFrames.value || undefined,
-    );
-    task.value = nextTask;
-    const latestTask = await waitForTask(nextTask.id);
-    if (latestTask.status === "completed") {
-      await loadAnnotations(latestTask.asset_id);
-    }
-  }, "识别任务创建失败");
+    const image = await uploadImage(file, currentTaskType.value, sessionId);
+    await bindImageToCurrentTask(image);
+    await loadImageHistory();
+    message.value = "上传完成，原图已保存";
+  }, "图片上传失败，请稍后重试");
 }
 
-async function pollTask() {
-  if (!task.value) return;
+async function loadImageHistory() {
   await runBusy(async () => {
-    const latestTask = await getTask(task.value!.id);
-    task.value = latestTask;
-    if (latestTask.status === "completed") {
-      await loadAnnotations(latestTask.asset_id);
-    }
-  }, "任务刷新失败");
+    const data = await listImages({ taskType: currentTaskType.value, page: 1, pageSize: 80, sessionId });
+    imageHistoryList.value = data.records;
+  }, "历史图片加载失败");
 }
 
-async function waitForTask(taskId: string) {
-  for (let attempt = 0; attempt < 600; attempt += 1) {
-    const latestTask = await getTask(taskId);
-    task.value = latestTask;
-    if (latestTask.status === "completed" || latestTask.status === "failed") {
-      return latestTask;
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 500));
-  }
-  throw new Error("任务等待超时");
-}
-
-async function loadAnnotations(assetId = selectedAssetId.value) {
-  if (!assetId) return;
+async function selectImage(image: ImageAsset) {
   await runBusy(async () => {
-    annotations.value = await getAnnotations(assetId);
-    selectedFrameIndex.value = 0;
-    exportText.value = "";
-  }, "标注加载失败");
+    await bindImageToCurrentTask(image);
+    const result = await getTaskResult({ imageId: image.imageId, taskType: currentTaskType.value, sessionId });
+    applyTaskResult(result);
+    await loadCurrentVersions();
+    message.value = result ? "任务结果已加载" : "当前图片暂无该任务结果";
+    resetView();
+  }, "图片或任务结果加载失败");
 }
 
-async function saveCurrentAnnotations() {
-  if (!selectedAssetId.value || !annotations.value) return;
+async function runCurrentTask() {
+  if (!currentState.value.currentImageId) {
+    message.value = "请先上传或选择图片";
+    return;
+  }
   await runBusy(async () => {
-    annotations.value = await saveAnnotations(selectedAssetId.value, annotations.value!);
-    message.value = "保存完成";
-  }, "保存失败");
+    currentState.value.status = "processing";
+    const result = await inferImageTask({
+      imageId: currentState.value.currentImageId!,
+      taskType: currentTaskType.value,
+      sessionId,
+      modelName: selectedModelByTask[currentTaskType.value],
+    });
+    applyTaskResult(result);
+    await loadCurrentVersions();
+    await loadImageHistory();
+    message.value = "AI 结果已生成并保存";
+  }, "AI 任务执行失败");
 }
 
-async function review(status: "approved" | "rejected" | "in_review") {
-  if (!selectedAssetId.value) return;
+async function saveCurrentResult() {
+  const state = currentState.value;
+  if (!state.currentImageId) {
+    message.value = "请先上传或选择图片";
+    return;
+  }
   await runBusy(async () => {
-    annotations.value = await reviewAnnotations(selectedAssetId.value, status);
-    message.value = status === "approved" ? "校验通过" : status === "rejected" ? "已驳回" : "进入校验";
-  }, "校验状态更新失败");
+    const task = state.taskId
+      ? { taskId: state.taskId }
+      : await createImageTask({ imageId: state.currentImageId!, taskType: currentTaskType.value, sessionId });
+    state.taskId = task.taskId;
+    await saveTaskResult({
+      taskId: state.taskId,
+      imageId: state.currentImageId,
+      taskType: currentTaskType.value,
+      resultImageUrl: state.resultImageUrl,
+      resultJson: state.resultJson,
+      annotationJson: state.annotationJson,
+      descriptionText: state.descriptionText,
+      source: "edited",
+      modelId: selectedModelByTask[currentTaskType.value],
+    });
+    await loadCurrentVersions();
+    await loadImageHistory();
+    message.value = "当前任务结果已保存";
+  }, "保存当前结果失败");
 }
 
-async function runExport(format: "json" | "coco" | "yolo") {
-  if (!selectedAssetId.value) return;
+async function saveAnnotationSnapshot() {
+  const state = currentState.value;
+  if (!state.taskId || !state.currentImageId || !state.annotationJson) {
+    message.value = "当前没有可保存的标注";
+    return;
+  }
   await runBusy(async () => {
-    exportText.value = await exportAnnotations(selectedAssetId.value, format);
-  }, "导出失败");
+    const result = await updateAnnotation({
+      taskId: state.taskId!,
+      imageId: state.currentImageId!,
+      taskType: currentTaskType.value,
+      annotationJson: state.annotationJson!,
+    });
+    applyTaskResult(result);
+    await saveTaskResult({
+      taskId: state.taskId!,
+      imageId: state.currentImageId!,
+      taskType: currentTaskType.value,
+      resultImageUrl: state.resultImageUrl,
+      resultJson: state.resultJson,
+      annotationJson: state.annotationJson,
+      descriptionText: state.descriptionText,
+      source: "edited",
+      modelId: selectedModelByTask[currentTaskType.value],
+    });
+    await loadCurrentVersions();
+    message.value = "标注已保存";
+  }, "标注保存失败");
 }
 
-function selectAsset(assetId: string) {
-  selectedAssetId.value = assetId;
-  task.value = null;
-  annotations.value = null;
-  selectedFrameIndex.value = 0;
-  exportText.value = "";
-  selectedObjectIndex.value = null;
-}
-
-function markObject(index: number, status: "confirmed" | "edited" | "rejected") {
-  const object = selectedFrame.value?.objects[index];
-  if (!object) return;
-  object.status = status;
-}
-
-function beginCanvasInteraction(event: PointerEvent) {
-  if (editMode.value !== "add" || !selectedFrame.value || !stageRef.value) return;
-  if ((event.target as HTMLElement).closest(".bbox")) return;
-  const point = framePoint(event);
-  if (!point) return;
-  const object = {
-    id: `obj_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`,
-    label: "new_target",
-    confidence: 1,
-    bbox: { x: point.x, y: point.y, width: 1, height: 1 },
-    track_id: null,
-    source: "manual" as const,
-    status: "edited" as const,
-  };
-  selectedFrame.value.objects.push(object);
-  const objectIndex = selectedFrame.value.objects.length - 1;
-  selectedObjectIndex.value = objectIndex;
-  interaction.value = {
-    mode: "create",
-    pointerId: event.pointerId,
-    objectIndex,
-    startX: point.x,
-    startY: point.y,
-    original: { ...object.bbox },
-  };
-  stageRef.value.setPointerCapture(event.pointerId);
-}
-
-function beginMove(event: PointerEvent, objectIndex: number) {
-  if (editMode.value !== "select") return;
-  const point = framePoint(event);
-  const object = selectedFrame.value?.objects[objectIndex];
-  if (!point || !object || !stageRef.value) return;
-  event.stopPropagation();
-  selectedObjectIndex.value = objectIndex;
-  interaction.value = {
-    mode: "move",
-    pointerId: event.pointerId,
-    objectIndex,
-    startX: point.x,
-    startY: point.y,
-    original: { ...object.bbox },
-  };
-  stageRef.value.setPointerCapture(event.pointerId);
-}
-
-function beginResize(event: PointerEvent, objectIndex: number, handle: ResizeHandle) {
-  const point = framePoint(event);
-  const object = selectedFrame.value?.objects[objectIndex];
-  if (!point || !object || !stageRef.value) return;
-  event.stopPropagation();
-  selectedObjectIndex.value = objectIndex;
-  interaction.value = {
-    mode: "resize",
-    pointerId: event.pointerId,
-    objectIndex,
-    handle,
-    startX: point.x,
-    startY: point.y,
-    original: { ...object.bbox },
-  };
-  stageRef.value.setPointerCapture(event.pointerId);
-}
-
-function updateInteraction(event: PointerEvent) {
-  const active = interaction.value;
-  const frame = selectedFrame.value;
-  const point = framePoint(event);
-  if (!active || !frame || !point) return;
-  const object = frame.objects[active.objectIndex];
-  if (!object) return;
-  const frameWidth = frame.width || 1;
-  const frameHeight = frame.height || 1;
-  const minSize = 4;
-  const dx = point.x - active.startX;
-  const dy = point.y - active.startY;
-
-  if (active.mode === "move") {
-    object.bbox.x = clamp(active.original.x + dx, 0, frameWidth - active.original.width);
-    object.bbox.y = clamp(active.original.y + dy, 0, frameHeight - active.original.height);
-  } else if (active.mode === "create") {
-    object.bbox.x = Math.min(active.startX, point.x);
-    object.bbox.y = Math.min(active.startY, point.y);
-    object.bbox.width = Math.max(Math.abs(point.x - active.startX), minSize);
-    object.bbox.height = Math.max(Math.abs(point.y - active.startY), minSize);
-  } else {
-    resizeObject(object.bbox, active, point.x, point.y, frameWidth, frameHeight, minSize);
+function applyTaskResult(result: ImageTaskResult | null) {
+  const state = currentState.value;
+  if (!result) {
+    state.taskId = null;
+    state.resultImageUrl = "";
+    state.resultJson = null;
+    state.annotationJson = null;
+    state.descriptionText = "";
+    state.status = "idle";
+    state.activeVersionId = null;
+    state.latestVersionNo = null;
+    state.isViewingHistory = false;
+    return;
   }
-  object.status = "edited";
+  state.taskId = result.taskId;
+  state.resultImageUrl = result.resultImageUrl || "";
+  state.resultJson = (result.resultJson as Record<string, unknown> | null) ?? null;
+  state.annotationJson = (result.annotationJson as Record<string, unknown> | null) ?? null;
+  state.descriptionText = result.descriptionText || "";
+  state.status = result.status || "success";
+  state.activeVersionId = result.latestVersionId || null;
+  state.latestVersionNo = result.latestVersionNo || null;
+  state.isViewingHistory = false;
 }
 
-function endInteraction(event: PointerEvent) {
-  if (!interaction.value || !stageRef.value) return;
-  if (stageRef.value.hasPointerCapture(event.pointerId)) {
-    stageRef.value.releasePointerCapture(event.pointerId);
+async function loadCurrentVersions() {
+  const state = currentState.value;
+  if (!state.currentImageId) {
+    state.versions = [];
+    return;
   }
-  interaction.value = null;
-  if (editMode.value === "add") editMode.value = "select";
-}
-
-function framePoint(event: PointerEvent) {
-  const frame = selectedFrame.value;
-  const stage = stageRef.value;
-  if (!frame || !stage) return null;
-  const rect = stage.getBoundingClientRect();
-  return {
-    x: clamp(((event.clientX - rect.left) / rect.width) * (frame.width || 1), 0, frame.width || 1),
-    y: clamp(((event.clientY - rect.top) / rect.height) * (frame.height || 1), 0, frame.height || 1),
-  };
-}
-
-function resizeObject(
-  bbox: { x: number; y: number; width: number; height: number },
-  active: Interaction,
-  x: number,
-  y: number,
-  frameWidth: number,
-  frameHeight: number,
-  minSize: number,
-) {
-  const right = active.original.x + active.original.width;
-  const bottom = active.original.y + active.original.height;
-  if (active.handle?.includes("w")) {
-    bbox.x = clamp(x, 0, right - minSize);
-    bbox.width = right - bbox.x;
-  }
-  if (active.handle?.includes("e")) {
-    bbox.width = clamp(x - active.original.x, minSize, frameWidth - active.original.x);
-  }
-  if (active.handle?.includes("n")) {
-    bbox.y = clamp(y, 0, bottom - minSize);
-    bbox.height = bottom - bbox.y;
-  }
-  if (active.handle?.includes("s")) {
-    bbox.height = clamp(y - active.original.y, minSize, frameHeight - active.original.y);
+  state.versions = await listTaskResultVersions({
+    imageId: state.currentImageId,
+    taskType: currentTaskType.value,
+    sessionId,
+  });
+  if (!state.activeVersionId && state.versions[0]) {
+    state.activeVersionId = state.versions[0].versionId;
+    state.latestVersionNo = state.versions[0].versionNo;
   }
 }
 
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), Math.max(min, max));
+async function viewVersion(versionId: string) {
+  await runBusy(async () => {
+    const version = await getTaskResultVersion(versionId);
+    const state = currentState.value;
+    state.taskId = version.taskId;
+    state.resultImageUrl = version.resultImageUrl || "";
+    state.resultJson = (version.resultJson as Record<string, unknown> | null) ?? null;
+    state.annotationJson = (version.annotationJson as Record<string, unknown> | null) ?? null;
+    state.descriptionText = version.descriptionText || "";
+    state.status = "success";
+    state.activeVersionId = version.versionId;
+    state.isViewingHistory = state.latestVersionNo !== version.versionNo;
+    message.value = `正在查看历史版本 v${version.versionNo}`;
+  }, "历史版本加载失败");
+}
+
+async function restoreVersion(versionId: string) {
+  await runBusy(async () => {
+    const result = await restoreTaskResultVersion(versionId);
+    applyTaskResult(result);
+    await loadCurrentVersions();
+    await loadImageHistory();
+    message.value = `已恢复为新版本 v${currentState.value.latestVersionNo || ""}`;
+  }, "恢复历史版本失败");
+}
+
+async function bindImageToCurrentTask(image: ImageAsset) {
+  const state = currentState.value;
+  state.currentImageId = image.imageId;
+  state.imageUrl = image.imageUrl || image.fileUrl;
+  state.imageInfo = image;
+  state.resultImageUrl = "";
+  state.resultJson = null;
+  state.annotationJson = null;
+  state.descriptionText = "";
+  state.status = "idle";
+  state.versions = [];
+  state.activeVersionId = null;
+  state.latestVersionNo = null;
+  state.isViewingHistory = false;
 }
 
 async function runBusy(action: () => Promise<void>, fallback: string) {
-  busy.value = true;
+  loading.value = true;
   message.value = "";
   try {
     await action();
   } catch (error) {
     message.value = error instanceof Error ? error.message : fallback;
   } finally {
-    busy.value = false;
+    loading.value = false;
   }
+}
+
+function validateImage(file: File): string {
+  const allowed = ["image/jpeg", "image/png", "image/webp", "image/bmp"];
+  const extAllowed = /\.(jpe?g|png|webp|bmp)$/i.test(file.name);
+  if (!allowed.includes(file.type) && !extAllowed) return "图片格式不支持，请上传 jpg、jpeg、png、webp 或 bmp";
+  if (file.size > 20 * 1024 * 1024) return "图片大小超过 20MB 限制";
+  return "";
+}
+
+function createDefaultTaskState(): TaskState {
+  return {
+    currentImageId: null,
+    imageUrl: "",
+    imageInfo: null,
+    taskId: null,
+    resultImageUrl: "",
+    resultJson: null,
+    annotationJson: null,
+    descriptionText: "",
+    status: "idle",
+    versions: [],
+    activeVersionId: null,
+    latestVersionNo: null,
+    isViewingHistory: false,
+  };
+}
+
+function getSessionId() {
+  const key = "railway-image-session-id";
+  const existing = window.localStorage.getItem(key);
+  if (existing) return existing;
+  const uuid =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  const created = `session_${uuid}`;
+  window.localStorage.setItem(key, created);
+  return created;
+}
+
+function formatBytes(value?: number | null) {
+  if (!value) return "-";
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatTime(value?: string) {
+  if (!value) return "-";
+  return new Date(value).toLocaleString();
+}
+
+function statusText(status: ImageTaskStatus) {
+  return {
+    idle: "未处理",
+    pending: "待处理",
+    processing: "处理中",
+    success: "已完成",
+    failed: "失败",
+  }[status];
+}
+
+function resultBoxes() {
+  return ((currentState.value.resultJson?.boxes as Array<Record<string, number | string>> | undefined) ?? []) as Array<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    label: string;
+    score: number;
+  }>;
+}
+
+function resultSegments() {
+  return ((currentState.value.resultJson?.segments as Array<Record<string, unknown>> | undefined) ?? []) as Array<{
+    label: string;
+    score: number;
+    polygon: number[][];
+  }>;
+}
+
+function resultKeypoints() {
+  return ((currentState.value.resultJson?.keypoints as Array<Record<string, number | string>> | undefined) ?? []) as Array<{
+    name: string;
+    x: number;
+    y: number;
+    score: number;
+  }>;
+}
+
+function resultLabels() {
+  return ((currentState.value.resultJson?.labels as Array<Record<string, number | string>> | undefined) ?? []) as Array<{
+    label: string;
+    score: number;
+  }>;
+}
+
+function onWheel(event: WheelEvent) {
+  if (!currentState.value.imageUrl) return;
+  event.preventDefault();
+  const direction = event.deltaY > 0 ? -0.12 : 0.12;
+  view.zoom = Math.min(4, Math.max(0.25, Number((view.zoom + direction).toFixed(2))));
+}
+
+function startDrag(event: PointerEvent) {
+  if (!currentState.value.imageUrl) return;
+  view.dragging = true;
+  view.startX = event.clientX;
+  view.startY = event.clientY;
+  view.originX = view.x;
+  view.originY = view.y;
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+function drag(event: PointerEvent) {
+  if (!view.dragging) return;
+  view.x = view.originX + event.clientX - view.startX;
+  view.y = view.originY + event.clientY - view.startY;
+}
+
+function stopDrag() {
+  view.dragging = false;
+}
+
+function resetView() {
+  view.zoom = 1;
+  view.x = 0;
+  view.y = 0;
+}
+
+function fitView() {
+  view.zoom = 0.9;
+  view.x = 0;
+  view.y = 0;
+}
+
+function originalView() {
+  view.zoom = 1;
+  view.x = 0;
+  view.y = 0;
 }
 </script>
 
 <template>
-  <main class="app-shell">
+  <main class="app-shell image-task-workspace">
     <header class="topbar">
-      <div>
-        <h1>铁路多目标识别校验台</h1>
-        <span>{{ busy ? "处理中" : "就绪" }}</span>
+      <div class="brand">
+        <img :src="'/favicon.svg'" alt="" />
+        <div>
+          <h1>铁路多目标识别平台</h1>
+          <span>{{ loading ? "处理中" : "就绪" }}<template v-if="message"> · {{ message }}</template></span>
+        </div>
       </div>
-      <div class="toolbar">
-        <label class="icon-button file-button" title="上传图片或视频">
-          <Upload :size="18" />
-          <input type="file" accept="image/*,video/*" @change="onFileChange" />
-        </label>
-        <button class="icon-button" title="刷新资源" :disabled="busy" @click="refreshAssets">
-          <RefreshCw :size="18" />
+      <nav class="task-tabs" aria-label="图像任务">
+        <button
+          v-for="task in taskConfigs"
+          :key="task.type"
+          :class="{ active: currentTaskType === task.type }"
+          @click="setTaskType(task.type)"
+        >
+          {{ task.title }}
         </button>
-      </div>
+      </nav>
     </header>
 
-    <section class="workspace">
-      <aside class="asset-pane">
-        <div class="pane-title">资源</div>
-        <div class="asset-list">
-          <button
-            v-for="asset in assets"
-            :key="asset.id"
-            :class="['asset-row', { active: asset.id === selectedAssetId }]"
-            @click="selectAsset(asset.id)"
-          >
-            <strong>{{ asset.filename }}</strong>
-            <span>
-              {{ asset.type }}
-              <template v-if="asset.width && asset.height"> · {{ asset.width }}x{{ asset.height }}</template>
-              <template v-if="asset.frame_count"> · {{ asset.frame_count }} 帧</template>
-            </span>
+    <section class="workspace-body">
+      <aside class="history-panel" :class="{ collapsed: historyCollapsed }">
+        <div class="panel-head">
+          <strong v-if="!historyCollapsed">历史图片</strong>
+          <button :title="historyCollapsed ? '展开历史列表' : '收起历史列表'" @click="historyCollapsed = !historyCollapsed">
+            <ChevronRight v-if="historyCollapsed" :size="16" />
+            <ChevronLeft v-else :size="16" />
           </button>
         </div>
+        <template v-if="!historyCollapsed">
+          <label class="upload-zone compact">
+            <Upload :size="18" />
+            <span>上传图片</span>
+            <input type="file" accept="image/jpeg,image/png,image/webp,image/bmp" @change="handleUpload" />
+          </label>
+          <button class="ghost-button" :disabled="loading" @click="loadImageHistory">
+            <RefreshCw :size="16" /> 刷新历史
+          </button>
+          <div class="history-list">
+            <button
+              v-for="image in imageHistoryList"
+              :key="image.imageId"
+              class="history-item"
+              :class="{ selected: image.imageId === currentState.currentImageId }"
+              @click="selectImage(image)"
+            >
+              <img :src="assetUrl(image.imageUrl)" alt="" />
+              <span>
+                <strong>{{ image.originalName }}</strong>
+                <small>{{ formatTime(image.createdAt) }}</small>
+                <small>{{ statusText(image.taskStatus) }} · {{ image.hasCurrentTaskResult ? "已有结果" : "暂无结果" }}</small>
+              </span>
+            </button>
+            <div v-if="imageHistoryList.length === 0" class="empty-state">暂无历史图片</div>
+          </div>
+        </template>
       </aside>
 
-      <section class="review-pane">
-        <div class="action-strip">
-          <select v-model="selectedAssetId">
-            <option value="">选择资源</option>
-            <option v-for="asset in assets" :key="asset.id" :value="asset.id">{{ asset.filename }}</option>
-          </select>
-          <label class="number-field">
-            <span>步长</span>
-            <input v-model.number="frameStride" type="number" min="1" />
-          </label>
-          <label class="number-field">
-            <span>最多帧</span>
-            <input v-model.number="maxFrames" type="number" min="1" placeholder="全部" />
-          </label>
-          <button :disabled="!selectedAssetId || busy" @click="startDetection">
-            <Play :size="17" />
-            标注
-          </button>
-          <button :disabled="!task || busy" @click="pollTask">
-            <RefreshCw :size="17" />
-            任务
-          </button>
-          <button :disabled="!selectedAssetId || busy" @click="loadAnnotations()">
-            <RefreshCw :size="17" />
-            结果
-          </button>
-          <button :disabled="!annotations || busy" @click="saveCurrentAnnotations">
-            <Save :size="17" />
-            保存
-          </button>
-          <button
-            :class="{ active: editMode === 'select' }"
-            :disabled="!selectedFrame"
-            title="选择并拖动检测框"
-            @click="editMode = 'select'"
-          >
-            <MousePointer2 :size="17" />
-            选择
-          </button>
-          <button
-            :class="{ active: editMode === 'add' }"
-            :disabled="!selectedFrame"
-            title="在图像上拖动新增检测框"
-            @click="editMode = 'add'"
-          >
-            <Plus :size="17" />
-            新增框
-          </button>
-          <button :disabled="!annotations || busy" @click="review('approved')">
-            <Check :size="17" />
-            通过
-          </button>
-          <button :disabled="!annotations || busy" @click="review('rejected')">
-            <X :size="17" />
-            驳回
-          </button>
+      <section class="editor-panel">
+        <div class="editor-toolbar">
+          <div>
+            <strong>{{ currentConfig.title }}</strong>
+            <span>{{ currentConfig.description }}</span>
         </div>
-
-        <div class="status-line">
-          <span>{{ selectedAsset ? selectedAsset.filename : "未选择资源" }}</span>
-          <span>{{ task ? `${task.status} · ${Math.round(task.progress * 100)}% · ${task.model_name}` : "无任务" }}</span>
-          <span>{{ annotations ? `校验：${annotations.review_status}` : "未加载标注" }}</span>
-          <span>{{ message }}</span>
-        </div>
-
-        <section class="frame-workspace">
-          <div class="frame-list">
-            <button
-              v-for="(frame, index) in annotations?.frames ?? []"
-              :key="frame.frame_index"
-              :class="['frame-row', { active: index === selectedFrameIndex }]"
-              @click="selectedFrameIndex = index"
-            >
-              <strong>#{{ frame.frame_index }}</strong>
-              <span>{{ frame.objects.length }} 个目标 · {{ frame.review_status }}</span>
+        <div class="toolbar-actions">
+          <label class="model-select">
+            <span>模型</span>
+            <select v-model="selectedModelByTask[currentTaskType]" :disabled="loading">
+              <option v-for="model in currentConfig.models" :key="model" :value="model">
+                {{ model }}
+              </option>
+            </select>
+          </label>
+          <button :disabled="!currentState.currentImageId || loading" @click="runCurrentTask">
+            <Loader2 v-if="loading" class="spin" :size="16" />
+            <Sparkles v-else :size="16" />
+              开始处理
+            </button>
+            <button :disabled="!currentState.currentImageId || loading" @click="saveCurrentResult">
+              <Save :size="16" /> 保存当前结果
+            </button>
+            <button :disabled="!currentState.annotationJson || loading" @click="saveAnnotationSnapshot">
+              <Download :size="16" /> 保存标注
             </button>
           </div>
-
-          <div class="preview-area">
-            <div
-              v-if="selectedFrame && frameImage"
-              ref="stageRef"
-              :class="['image-stage', { drawing: editMode === 'add' }]"
-              @pointerdown="beginCanvasInteraction"
-              @pointermove="updateInteraction"
-              @pointerup="endInteraction"
-              @pointercancel="endInteraction"
-            >
-              <img :src="frameImage" alt="frame" draggable="false" />
-              <div
-                v-for="(object, objectIndex) in selectedFrameObjects"
-                :key="object.id"
-                :class="['bbox', { selected: objectIndex === selectedObjectIndex }]"
-                :style="{
-                  left: `${(object.bbox.x / (selectedFrame.width || 1)) * 100}%`,
-                  top: `${(object.bbox.y / (selectedFrame.height || 1)) * 100}%`,
-                  width: `${(object.bbox.width / (selectedFrame.width || 1)) * 100}%`,
-                  height: `${(object.bbox.height / (selectedFrame.height || 1)) * 100}%`,
-                }"
-                @pointerdown="beginMove($event, objectIndex)"
-              >
-                <span>{{ object.label }} {{ Math.round(object.confidence * 100) }}%</span>
-                <template v-if="objectIndex === selectedObjectIndex">
-                  <i
-                    v-for="handle in resizeHandles"
-                    :key="handle"
-                    :class="['resize-handle', handle]"
-                    @pointerdown="beginResize($event, objectIndex, handle)"
-                  />
-                </template>
-              </div>
-            </div>
-            <div v-else class="empty-state">上传资源并执行自动标注后显示帧图</div>
-          </div>
-
-          <div class="object-table">
-            <div class="table-head">
-              <span>类别</span>
-              <span>置信度</span>
-              <span>状态</span>
-              <span>操作</span>
-            </div>
-            <div
-              v-for="(object, index) in selectedFrameObjects"
-              :key="object.id"
-              :class="['table-row', { selected: index === selectedObjectIndex }]"
-              @click="selectedObjectIndex = index"
-            >
-              <input v-model="object.label" @change="markObject(index, 'edited')" />
-              <span>{{ object.confidence.toFixed(3) }}</span>
-              <select v-model="object.status">
-                <option value="auto">auto</option>
-                <option value="confirmed">confirmed</option>
-                <option value="edited">edited</option>
-                <option value="rejected">rejected</option>
-              </select>
-              <div class="row-actions">
-                <button title="确认" @click="markObject(index, 'confirmed')"><Check :size="16" /></button>
-                <button title="驳回" @click="markObject(index, 'rejected')"><X :size="16" /></button>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <div class="export-strip">
-          <button :disabled="!selectedAssetId || busy" @click="runExport('json')">
-            <Download :size="17" />
-            JSON
-          </button>
-          <button :disabled="!selectedAssetId || busy" @click="runExport('coco')">
-            <Download :size="17" />
-            COCO
-          </button>
-          <button :disabled="!selectedAssetId || busy" @click="runExport('yolo')">
-            <Download :size="17" />
-            YOLO
-          </button>
         </div>
 
-        <pre class="export-view">{{ exportText }}</pre>
+        <div
+          class="canvas-stage"
+          @wheel="onWheel"
+          @pointerdown="startDrag"
+          @pointermove="drag"
+          @pointerup="stopDrag"
+          @pointerleave="stopDrag"
+        >
+          <div v-if="!currentState.imageUrl" class="empty-canvas">
+            <ImageIcon :size="40" />
+            <label class="upload-zone">
+              <Upload :size="20" />
+              <span>选择图片开始</span>
+              <input type="file" accept="image/jpeg,image/png,image/webp,image/bmp" @change="handleUpload" />
+            </label>
+          </div>
+
+          <div
+            v-else
+            class="canvas-content"
+            :style="{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }"
+          >
+            <img class="base-image" :src="currentImageUrl" alt="原始图片" />
+            <svg
+              v-if="currentState.imageInfo?.width && currentState.imageInfo?.height"
+              class="overlay-layer"
+              :viewBox="`0 0 ${currentState.imageInfo.width} ${currentState.imageInfo.height}`"
+            >
+              <template v-if="currentTaskType === 'detection'">
+                <g v-for="(box, index) in resultBoxes()" :key="index">
+                  <rect class="box-shape" :x="box.x" :y="box.y" :width="box.width" :height="box.height" />
+                  <text class="box-label" :x="box.x + 4" :y="Math.max(box.y - 8, 16)">
+                    {{ box.label }} {{ Math.round(box.score * 100) }}%
+                  </text>
+                </g>
+              </template>
+              <template v-if="currentTaskType === 'segmentation'">
+                <polygon
+                  v-for="(segment, index) in resultSegments()"
+                  :key="index"
+                  class="segment-shape"
+                  :points="segment.polygon.map((point) => point.join(',')).join(' ')"
+                />
+              </template>
+              <template v-if="currentTaskType === 'pose'">
+                <circle v-for="point in resultKeypoints()" :key="point.name" class="keypoint" :cx="point.x" :cy="point.y" r="8" />
+              </template>
+            </svg>
+          </div>
+        </div>
+
+        <div class="view-controls">
+          <button @click="fitView"><Maximize2 :size="15" /> 适应窗口</button>
+          <button @click="originalView"><ZoomIn :size="15" /> 原始比例</button>
+          <button @click="resetView"><RotateCcw :size="15" /> 重置视图</button>
+          <span>缩放 {{ Math.round(view.zoom * 100) }}%</span>
+        </div>
       </section>
+
+      <aside class="thumbnail-panel" :class="{ collapsed: thumbnailCollapsed }">
+        <div class="panel-head">
+          <strong v-if="!thumbnailCollapsed">原图缩略图</strong>
+          <button :title="thumbnailCollapsed ? '展开原图信息' : '收起原图信息'" @click="thumbnailCollapsed = !thumbnailCollapsed">
+            <ChevronLeft v-if="thumbnailCollapsed" :size="16" />
+            <ChevronRight v-else :size="16" />
+          </button>
+        </div>
+        <template v-if="!thumbnailCollapsed">
+          <button v-if="currentState.imageInfo" class="thumbnail-card" @click="originalPreview = currentState.imageInfo">
+            <img :src="currentImageUrl" alt="原图缩略图" />
+          </button>
+          <div v-else class="empty-state">暂无原图</div>
+
+          <dl v-if="currentState.imageInfo" class="image-info">
+            <dt>文件名</dt>
+            <dd>{{ currentState.imageInfo.originalName }}</dd>
+            <dt>分辨率</dt>
+            <dd>{{ currentState.imageInfo.width || "-" }} x {{ currentState.imageInfo.height || "-" }}</dd>
+            <dt>大小</dt>
+            <dd>{{ formatBytes(currentState.imageInfo.fileSize) }}</dd>
+            <dt>上传时间</dt>
+            <dd>{{ formatTime(currentState.imageInfo.createdAt) }}</dd>
+          </dl>
+
+          <section class="result-summary">
+            <h2>任务结果</h2>
+            <div v-if="currentState.isViewingHistory" class="history-viewing">
+              正在查看历史版本，恢复后会生成一个新版本。
+            </div>
+            <div v-if="currentState.status === 'idle'" class="empty-state">当前图片暂无该任务结果</div>
+            <template v-else-if="currentTaskType === 'classification'">
+              <div v-for="item in resultLabels()" :key="item.label" class="result-row">
+                <strong>{{ item.label }}</strong><span>{{ Math.round(item.score * 100) }}%</span>
+              </div>
+            </template>
+            <p v-else-if="currentTaskType === 'caption'" class="caption-text">{{ currentState.descriptionText || "暂无描述" }}</p>
+            <template v-else>
+              <div class="result-row">
+                <strong>{{ currentConfig.title }}</strong>
+                <span>
+                  {{
+                    currentTaskType === "detection"
+                      ? `${resultBoxes().length} 个目标`
+                      : currentTaskType === "segmentation"
+                        ? `${resultSegments().length} 个区域`
+                        : `${resultKeypoints().length} 个关键点`
+                  }}
+                </span>
+              </div>
+            </template>
+          </section>
+
+          <section class="result-summary version-summary">
+            <h2>历史版本</h2>
+            <div v-if="currentState.versions.length === 0" class="empty-state">暂无保存版本</div>
+            <div v-else class="version-list">
+              <button
+                v-for="version in currentState.versions"
+                :key="version.versionId"
+                class="version-row"
+                :class="{ selected: version.versionId === currentState.activeVersionId }"
+                @click="viewVersion(version.versionId)"
+              >
+                <span>
+                  <strong>v{{ version.versionNo }}</strong>
+                  <small>{{ version.source }} · {{ version.modelId || "-" }}</small>
+                </span>
+                <small>{{ formatTime(version.createdAt) }}</small>
+              </button>
+            </div>
+            <button
+              class="ghost-button restore-button"
+              :disabled="!currentState.activeVersionId || !currentState.isViewingHistory || loading"
+              @click="restoreVersion(currentState.activeVersionId!)"
+            >
+              恢复此版本
+            </button>
+          </section>
+        </template>
+      </aside>
     </section>
+
+    <div v-if="originalPreview" class="modal-backdrop" @click="originalPreview = null">
+      <div class="original-modal" @click.stop>
+        <img :src="assetUrl(originalPreview.imageUrl)" alt="原图预览" />
+        <button @click="originalPreview = null">关闭</button>
+      </div>
+    </div>
   </main>
 </template>

@@ -2,6 +2,7 @@
 __pycache__/
 .pytest_cache/
 .playwright-mcp/
+.serena/
 .ruff_cache/
 node_modules/
 dist/
@@ -19,3 +20,5 @@ frontend/vite.config.d.ts
 *.pth
 *.onnx
 *.engine
+test_data/
+railway-frontend-*.png

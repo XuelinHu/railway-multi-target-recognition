@@ -2,8 +2,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-from app.api import annotations, assets, export, tasks
+from app.api import ai, annotations, assets, export, image_tasks, images, tasks, vision
 from app.core.config import get_settings
 from app.core.dependencies import get_store, get_task_service
 from app.services.task_worker import DatabaseTaskWorker
@@ -41,6 +42,11 @@ def create_app() -> FastAPI:
     app.include_router(tasks.router)
     app.include_router(annotations.router)
     app.include_router(export.router)
+    app.include_router(vision.router)
+    app.include_router(images.router)
+    app.include_router(image_tasks.router)
+    app.include_router(ai.router)
+    app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
 
     @app.get("/health")
     def health() -> dict[str, str]:
