@@ -99,6 +99,7 @@ button.active {
 }
 
 .task-tabs,
+.task-strip,
 .task-mini-tabs,
 .annotation-toolbar,
 .toolbar-actions,
@@ -134,6 +135,18 @@ button.active {
 
 .task-tabs button {
   min-width: 86px;
+}
+
+.task-strip {
+  min-height: 48px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #d7dee6;
+  background: #fbfcfe;
+}
+
+.task-strip button {
+  min-width: 112px;
+  white-space: nowrap;
 }
 
 .workspace-body {
@@ -303,11 +316,14 @@ button.active {
   padding: 6px 12px;
   border-bottom: 1px solid #e1e7ee;
   background: #fbfcfe;
+  flex-wrap: nowrap;
+  overflow-x: auto;
 }
 
 .annotation-toolbar button {
   min-width: 36px;
   padding: 0 10px;
+  white-space: nowrap;
 }
 
 .canvas-stage {
@@ -546,6 +562,49 @@ button.active {
   border-bottom: 1px solid #edf1f5;
 }
 
+.result-row strong,
+.result-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.annotated-summary {
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.annotation-row {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  justify-items: stretch;
+  text-align: left;
+  background: #f8fafc;
+}
+
+.annotation-row.selected {
+  border-color: #f59e0b;
+  background: #fff7df;
+}
+
+.annotation-row strong,
+.annotation-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.annotation-row span {
+  color: #66717d;
+  font-size: 12px;
+}
+
 .caption-text {
   margin: 0;
   line-height: 1.6;
@@ -564,19 +623,22 @@ button.active {
 
 .version-summary {
   padding-top: 10px;
+  max-height: 170px;
+  overflow-y: auto;
 }
 
 .version-list {
   display: grid;
-  gap: 6px;
+  gap: 4px;
 }
 
 .version-row {
   width: 100%;
-  min-height: 48px;
-  padding: 8px;
+  min-height: 34px;
+  padding: 6px 8px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
   justify-items: stretch;
   text-align: left;
   background: #f8fafc;
@@ -591,13 +653,17 @@ button.active {
   min-width: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 8px;
+  overflow: hidden;
 }
 
 .version-row small {
   color: #66717d;
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .restore-button {
@@ -635,7 +701,7 @@ button.active {
 
 .label-form {
   display: grid;
-  grid-template-columns: minmax(180px, 240px) minmax(160px, 1fr) minmax(160px, 1fr) minmax(240px, 1.4fr) auto;
+  grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) minmax(240px, 1.6fr) auto;
   gap: 12px;
   align-items: end;
   padding: 14px;

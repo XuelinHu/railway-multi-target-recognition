@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import {
   Boxes,
   Check,
@@ -36,6 +36,7 @@ import {
   assetUrl,
   createImageTask,
   createLabel,
+  copyLabel,
   deleteLabel,
   getTaskResult,
   getTaskResultVersion,
@@ -120,7 +121,6 @@ const polygonDraft = ref<Point[]>([]);
 const drawing = reactive({ active: false, mode: "" as "" | "draw" | "move" | "resize", shapeId: "", start: null as Point | null });
 
 const labelForm = reactive({
-  copyFromLabelId: "" as string,
   englishName: "",
   chineseName: "",
   description: "",
@@ -166,9 +166,14 @@ const selectedLabelId = computed({
 });
 
 onMounted(async () => {
+  window.addEventListener("keydown", handleGlobalKeydown);
   await Promise.all([loadLabels(), loadImageHistory()]);
   const first = imageHistoryList.value[0];
   if (first) await selectImage(first);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleGlobalKeydown);
 });
 
 async function setTaskType(taskType: ImageTaskType) {
@@ -390,24 +395,13 @@ async function loadLabels() {
   }, "标签加载失败");
 }
 
-function applyLabelTemplate() {
-  const id = Number(labelForm.copyFromLabelId);
-  const template = labels.value.find((label) => label.labelId === id);
-  if (!template) return;
-  labelForm.englishName = `${template.englishName}_copy`;
-  labelForm.chineseName = `${template.chineseName}副本`;
-  labelForm.description = template.description;
-}
-
 async function submitLabel() {
   await runBusy(async () => {
     await createLabel({
       englishName: labelForm.englishName.trim(),
       chineseName: labelForm.chineseName.trim(),
       description: labelForm.description.trim(),
-      copyFromLabelId: labelForm.copyFromLabelId === "" ? null : Number(labelForm.copyFromLabelId),
     });
-    labelForm.copyFromLabelId = "";
     labelForm.englishName = "";
     labelForm.chineseName = "";
     labelForm.description = "";
@@ -421,6 +415,14 @@ function startEditLabel(label: LabelConfig) {
   editingLabel.englishName = label.englishName;
   editingLabel.chineseName = label.chineseName;
   editingLabel.description = label.description;
+}
+
+async function duplicateLabel(labelId: number) {
+  await runBusy(async () => {
+    await copyLabel(labelId);
+    await loadLabels();
+    message.value = "标签已复制";
+  }, "复制标签失败");
 }
 
 async function submitEditLabel(labelId: number) {
@@ -581,6 +583,21 @@ function removeSelectedShape() {
   selectedShapeId.value = null;
 }
 
+function selectShape(shapeId: string) {
+  selectedShapeId.value = shapeId;
+  activeTool.value = "select";
+}
+
+function handleGlobalKeydown(event: KeyboardEvent) {
+  const target = event.target as HTMLElement | null;
+  if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
+  if (currentPage.value !== "workspace") return;
+  if ((event.key === "Delete" || event.key === "Backspace") && selectedShapeId.value) {
+    event.preventDefault();
+    removeSelectedShape();
+  }
+}
+
 function setShapes(shapes: AnnotationShape[]) {
   currentState.value.annotationJson = {
     ...(currentState.value.annotationJson ?? emptyAnnotation()),
@@ -711,6 +728,10 @@ function polygonPoints(points: Point[]) {
 
 function linePoints(points: Point[]) {
   return points.length >= 2 ? { x1: points[0].x, y1: points[0].y, x2: points[1].x, y2: points[1].y } : { x1: 0, y1: 0, x2: 0, y2: 0 };
+}
+
+function shapeTypeText(type: ShapeType) {
+  return { box: "矩形框", polygon: "多边形", line: "线段" }[type];
 }
 
 function resultKeypoints() {
@@ -851,6 +872,12 @@ function statusText(status: ImageTaskStatus) {
       </nav>
     </header>
 
+    <nav v-if="currentPage === 'workspace'" class="task-strip" aria-label="功能页面">
+      <button v-for="task in taskConfigs" :key="task.type" :class="{ active: currentTaskType === task.type }" @click="setTaskType(task.type)">
+        {{ task.title }}
+      </button>
+    </nav>
+
     <section v-if="currentPage === 'workspace'" class="workspace-body">
       <aside class="history-panel" :class="{ collapsed: historyCollapsed }">
         <div class="panel-head">
@@ -861,11 +888,6 @@ function statusText(status: ImageTaskStatus) {
           </button>
         </div>
         <template v-if="!historyCollapsed">
-          <div class="task-mini-tabs">
-            <button v-for="task in taskConfigs" :key="task.type" :class="{ active: currentTaskType === task.type }" @click="setTaskType(task.type)">
-              {{ task.title }}
-            </button>
-          </div>
           <label class="upload-zone compact">
             <Upload :size="18" />
             <span>上传图片</span>
@@ -916,13 +938,13 @@ function statusText(status: ImageTaskStatus) {
         </div>
 
         <div class="annotation-toolbar">
-          <button :class="{ active: activeTool === 'select' }" title="选择" @click="setTool('select')"><MousePointer2 :size="16" /></button>
-          <button :class="{ active: activeTool === 'pan' }" title="移动画布" @click="setTool('pan')"><Move :size="16" /></button>
-          <button :class="{ active: activeTool === 'box' }" title="矩形框" @click="setTool('box')"><Boxes :size="16" /></button>
-          <button :class="{ active: activeTool === 'polygon' }" title="多边形" @click="setTool('polygon')"><Pentagon :size="16" /></button>
-          <button :class="{ active: activeTool === 'line' }" title="线段" @click="setTool('line')"><Waypoints :size="16" /></button>
-          <button :disabled="polygonDraft.length < 3" @click="finishPolygon"><Check :size="16" />完成多边形</button>
-          <button :disabled="polygonDraft.length === 0" @click="cancelPolygon"><RotateCcw :size="16" />取消</button>
+          <button :class="{ active: activeTool === 'select' }" title="选择" @click="setTool('select')"><MousePointer2 :size="16" />（选择）</button>
+          <button :class="{ active: activeTool === 'pan' }" title="移动画布" @click="setTool('pan')"><Move :size="16" />（移动）</button>
+          <button :class="{ active: activeTool === 'box' }" title="矩形框" @click="setTool('box')"><Boxes :size="16" />（矩形框）</button>
+          <button :class="{ active: activeTool === 'polygon' }" title="多边形" @click="setTool('polygon')"><Pentagon :size="16" />（多边形）</button>
+          <button :class="{ active: activeTool === 'line' }" title="线段" @click="setTool('line')"><Waypoints :size="16" />（线段）</button>
+          <button :disabled="polygonDraft.length < 3" @click="finishPolygon"><Check :size="16" />（完成）</button>
+          <button :disabled="polygonDraft.length === 0" @click="cancelPolygon"><RotateCcw :size="16" />（取消）</button>
         </div>
 
         <div
@@ -1045,10 +1067,25 @@ function statusText(status: ImageTaskStatus) {
                   </option>
                 </select>
               </label>
-              <div class="result-row"><strong>类型</strong><span>{{ selectedShape.type }}</span></div>
+              <div class="result-row"><strong>类型</strong><span>{{ shapeTypeText(selectedShape.type) }}</span></div>
               <div class="result-row"><strong>来源</strong><span>{{ selectedShape.source }}</span></div>
               <button class="danger-button" @click="removeSelectedShape"><Trash2 :size="16" />删除标注</button>
             </template>
+          </section>
+
+          <section class="result-summary annotated-summary">
+            <h2>已标注对象</h2>
+            <div v-if="annotationShapes.length === 0" class="empty-state">暂无标注对象</div>
+            <button
+              v-for="(shape, index) in annotationShapes"
+              :key="shape.id"
+              class="annotation-row"
+              :class="{ selected: shape.id === selectedShapeId }"
+              @click="selectShape(shape.id)"
+            >
+              <strong>{{ index + 1 }}. {{ shape.label }}</strong>
+              <span>{{ shapeTypeText(shape.type) }}</span>
+            </button>
           </section>
 
           <section class="result-summary">
@@ -1097,13 +1134,6 @@ function statusText(status: ImageTaskStatus) {
       </div>
 
       <form class="label-form" @submit.prevent="submitLabel">
-        <label class="field-label">
-          <span>复制已有标签</span>
-          <select v-model="labelForm.copyFromLabelId" @change="applyLabelTemplate">
-            <option value="">不复制</option>
-            <option v-for="label in labels" :key="label.labelId" :value="label.labelId">#{{ label.labelId }} {{ label.englishName }} / {{ label.chineseName }}</option>
-          </select>
-        </label>
         <label class="field-label"><span>英文名称</span><input v-model="labelForm.englishName" required placeholder="person" /></label>
         <label class="field-label"><span>中文名称</span><input v-model="labelForm.chineseName" required placeholder="行人" /></label>
         <label class="field-label wide"><span>描述信息</span><textarea v-model="labelForm.description" rows="2" placeholder="标签使用范围、边界说明或审核标准"></textarea></label>
@@ -1136,7 +1166,7 @@ function statusText(status: ImageTaskStatus) {
             <span>{{ formatTime(label.updatedAt) }}</span>
             <span class="row-actions">
               <button title="编辑" @click="startEditLabel(label)"><Edit3 :size="15" /></button>
-              <button title="复制到新增表单" @click="labelForm.copyFromLabelId = String(label.labelId); applyLabelTemplate()"><Copy :size="15" /></button>
+              <button title="复制标签" @click="duplicateLabel(label.labelId)"><Copy :size="15" /></button>
               <button title="删除" @click="removeLabel(label.labelId)"><Trash2 :size="15" /></button>
             </span>
           </template>

@@ -24,7 +24,15 @@ def create_label(request: LabelConfigCreateRequest, store: PostgresStore = Depen
             copy_from_label_id=request.copy_from_label_id,
         )
     except Exception as exc:
-        raise HTTPException(status_code=409, detail="标签英文名已存在或数据不合法") from exc
+        raise HTTPException(status_code=409, detail="标签数据不合法") from exc
+    return ApiResponse(data=label.model_dump(mode="json", by_alias=True))
+
+
+@router.post("/{label_id}/copy")
+def copy_label(label_id: int, store: PostgresStore = Depends(get_store)) -> ApiResponse:
+    label = store.copy_label_config(label_id)
+    if label is None:
+        raise HTTPException(status_code=404, detail="标签不存在")
     return ApiResponse(data=label.model_dump(mode="json", by_alias=True))
 
 
@@ -42,7 +50,7 @@ def update_label(
             description=request.description,
         )
     except Exception as exc:
-        raise HTTPException(status_code=409, detail="标签英文名已存在或数据不合法") from exc
+        raise HTTPException(status_code=409, detail="标签数据不合法") from exc
     if label is None:
         raise HTTPException(status_code=404, detail="标签不存在")
     return ApiResponse(data=label.model_dump(mode="json", by_alias=True))

@@ -173,17 +173,11 @@ def test_label_config_crud_uses_zero_based_ids(monkeypatch, tmp_path):
     assert created.status_code == 200
     assert created.json()["data"]["labelId"] == 0
 
-    copied = client.post(
-        "/api/labels",
-        json={
-            "englishName": "worker",
-            "chineseName": "工作人员",
-            "description": "",
-            "copyFromLabelId": 0,
-        },
-    )
+    copied = client.post("/api/labels/0/copy")
     assert copied.status_code == 200
     assert copied.json()["data"]["labelId"] == 1
+    assert copied.json()["data"]["englishName"] == "person"
+    assert copied.json()["data"]["chineseName"] == "行人"
 
     updated = client.put(
         "/api/labels/1",

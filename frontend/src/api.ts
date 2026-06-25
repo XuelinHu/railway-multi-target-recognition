@@ -253,6 +253,10 @@ export function updateLabel(
   });
 }
 
+export function copyLabel(labelId: number): Promise<LabelConfig> {
+  return apiData<LabelConfig>(`/api/labels/${labelId}/copy`, { method: "POST" });
+}
+
 export function deleteLabel(labelId: number): Promise<{ deleted: boolean }> {
   return apiData<{ deleted: boolean }>(`/api/labels/${labelId}`, { method: "DELETE" });
 }

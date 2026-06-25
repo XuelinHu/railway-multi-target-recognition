@@ -124,7 +124,7 @@ class LabelConfigRecord(Base):
     __tablename__ = "label_config"
 
     label_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    english_name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    english_name: Mapped[str] = mapped_column(String(120), index=True)
     chinese_name: Mapped[str] = mapped_column(String(120), index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -137,6 +137,7 @@ class PostgresStore:
         self.engine = create_engine(database_url, pool_pre_ping=True, connect_args=connect_args)
         self.session_factory = sessionmaker(self.engine, expire_on_commit=False)
         Base.metadata.create_all(self.engine)
+        self._ensure_label_config_schema(database_url)
 
     def create_asset(self, asset: Asset) -> Asset:
         with self.session_factory.begin() as session:
@@ -460,6 +461,25 @@ class PostgresStore:
             session.flush()
             return self._label_config_from_record(record)
 
+    def copy_label_config(self, label_id: int) -> LabelConfig | None:
+        with self.session_factory.begin() as session:
+            template = session.get(LabelConfigRecord, label_id)
+            if template is None:
+                return None
+            next_id = session.scalar(select(func.coalesce(func.max(LabelConfigRecord.label_id), -1) + 1))
+            now = now_utc()
+            record = LabelConfigRecord(
+                label_id=int(next_id or 0),
+                english_name=template.english_name,
+                chinese_name=template.chinese_name,
+                description=template.description,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(record)
+            session.flush()
+            return self._label_config_from_record(record)
+
     def update_label_config(
         self,
         label_id: int,
@@ -492,6 +512,13 @@ class PostgresStore:
     def healthcheck(self) -> bool:
         with self.engine.connect() as connection:
             return connection.execute(text("SELECT 1")).scalar_one() == 1
+
+    def _ensure_label_config_schema(self, database_url: str) -> None:
+        if not database_url.startswith("postgresql"):
+            return
+        with self.engine.begin() as connection:
+            connection.execute(text("ALTER TABLE label_config DROP CONSTRAINT IF EXISTS label_config_english_name_key"))
+            connection.execute(text("DROP INDEX IF EXISTS ix_label_config_english_name"))
 
     def _task_record(self, task: DetectTask) -> TaskRecord:
         return TaskRecord(
