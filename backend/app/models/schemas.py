@@ -213,6 +213,34 @@ class AiInferRequest(BaseModel):
     session_id: str | None = Field(default=None, alias="sessionId")
 
 
+class LabelConfig(BaseModel):
+    label_id: int = Field(ge=0, alias="labelId")
+    english_name: str = Field(min_length=1, max_length=120, alias="englishName")
+    chinese_name: str = Field(min_length=1, max_length=120, alias="chineseName")
+    description: str = ""
+    created_at: datetime = Field(default_factory=now_utc, alias="createdAt")
+    updated_at: datetime = Field(default_factory=now_utc, alias="updatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class LabelConfigCreateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    english_name: str = Field(min_length=1, max_length=120, alias="englishName")
+    chinese_name: str = Field(min_length=1, max_length=120, alias="chineseName")
+    description: str = ""
+    copy_from_label_id: int | None = Field(default=None, ge=0, alias="copyFromLabelId")
+
+
+class LabelConfigUpdateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    english_name: str = Field(min_length=1, max_length=120, alias="englishName")
+    chinese_name: str = Field(min_length=1, max_length=120, alias="chineseName")
+    description: str = ""
+
+
 class ApiResponse(BaseModel):
     code: int = 200
     message: str = "success"

@@ -13,6 +13,7 @@ from app.models.schemas import (
     ImageTaskResultVersion,
     ImageTaskStatus,
     ImageTaskType,
+    LabelConfig,
     now_utc,
 )
 
@@ -117,6 +118,17 @@ class ImageTaskResultVersionRecord(Base):
     annotation_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     description_text: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class LabelConfigRecord(Base):
+    __tablename__ = "label_config"
+
+    label_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    english_name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    chinese_name: Mapped[str] = mapped_column(String(120), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class PostgresStore:
@@ -415,6 +427,65 @@ class PostgresStore:
         )
         return self.save_image_task_result(result)
 
+    def list_label_configs(self) -> list[LabelConfig]:
+        with self.session_factory() as session:
+            records = session.scalars(select(LabelConfigRecord).order_by(LabelConfigRecord.label_id.asc())).all()
+            return [self._label_config_from_record(record) for record in records]
+
+    def create_label_config(
+        self,
+        english_name: str,
+        chinese_name: str,
+        description: str = "",
+        copy_from_label_id: int | None = None,
+    ) -> LabelConfig:
+        with self.session_factory.begin() as session:
+            if copy_from_label_id is not None:
+                template = session.get(LabelConfigRecord, copy_from_label_id)
+                if template:
+                    english_name = english_name or f"{template.english_name}_copy"
+                    chinese_name = chinese_name or f"{template.chinese_name}副本"
+                    description = description or template.description
+            next_id = session.scalar(select(func.coalesce(func.max(LabelConfigRecord.label_id), -1) + 1))
+            now = now_utc()
+            record = LabelConfigRecord(
+                label_id=int(next_id or 0),
+                english_name=english_name.strip(),
+                chinese_name=chinese_name.strip(),
+                description=description.strip(),
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(record)
+            session.flush()
+            return self._label_config_from_record(record)
+
+    def update_label_config(
+        self,
+        label_id: int,
+        english_name: str,
+        chinese_name: str,
+        description: str = "",
+    ) -> LabelConfig | None:
+        with self.session_factory.begin() as session:
+            record = session.get(LabelConfigRecord, label_id)
+            if record is None:
+                return None
+            record.english_name = english_name.strip()
+            record.chinese_name = chinese_name.strip()
+            record.description = description.strip()
+            record.updated_at = now_utc()
+            session.flush()
+            return self._label_config_from_record(record)
+
+    def delete_label_config(self, label_id: int) -> bool:
+        with self.session_factory.begin() as session:
+            record = session.get(LabelConfigRecord, label_id)
+            if record is None:
+                return False
+            session.delete(record)
+            return True
+
     def close(self) -> None:
         self.engine.dispose()
 
@@ -576,3 +647,13 @@ class PostgresStore:
                 .limit(1)
             )
             return self._image_task_result_version_from_record(record) if record else None
+
+    def _label_config_from_record(self, record: LabelConfigRecord) -> LabelConfig:
+        return LabelConfig(
+            label_id=record.label_id,
+            english_name=record.english_name,
+            chinese_name=record.chinese_name,
+            description=record.description,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )

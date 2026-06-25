@@ -23,7 +23,9 @@
 - PostgreSQL 持久化资产、任务、标注和人工校验状态。
 - PostgreSQL 任务表作为推理队列，使用行锁领取任务，不依赖 Redis。
 - 人工校验支持通过、驳回、目标级确认、编辑和剔除。
-- 检测框支持新增、拖动和四角缩放。
+- Web 标注区参考 makeSense.ai 的工作台形态，支持选择、移动画布、矩形框、多边形、线段和缩放查看。
+- 检测框支持新增、拖动和右下角缩放。
+- 系统配置提供标签管理，标签包含从 0 开始生成的 ID、英文名称、中文名称、描述、生成日期和修改日期。
 - JSON、COCO、YOLO 三种格式导出。
 - Vue 前端工作台，提供上传、逐帧预览、检测框叠加、人工校验和导出入口。
 
@@ -184,12 +186,29 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8010
 
 TensorRT engine 与构建机器的 GPU、CUDA 和 TensorRT 版本相关，建议直接在 RTX 3090 运行环境中生成。
 
-## 人工框选
+## 人工标注工作台
 
-- 点击“选择”后拖动检测框可调整位置。
-- 选中检测框后拖动四角手柄可缩放。
-- 点击“新增框”后在图像上拖动可创建人工检测框。
-- 新增或修改的目标会标记为 `edited`，点击“保存”写入 PostgreSQL。
+- 点击“选择”后可选中标注对象，右侧面板可为对象选择系统配置中的标签。
+- 点击“移动画布”后拖动画布，滚轮可缩放查看。
+- 点击“矩形框”后在图像上拖动可创建人工检测框，选中后拖动对象可移动，拖动右下角手柄可缩放。
+- 点击“多边形”后逐点点击图像，双击或点击“完成多边形”闭合保存。
+- 点击“线段”后在图像上拖动可创建线状标注。
+- 新增或修改的对象会写入 `annotationJson.shapes`，保存后进入 PostgreSQL 版本记录。
+
+## 系统配置
+
+系统配置页用于维护人工复核标签。新增标签时可选择复制已有标签，系统会带出英文名、中文名和描述，保存后自动分配下一个标签 ID。
+
+标签字段：
+
+```text
+labelId       从 0 开始的系统 ID
+englishName   英文名称，用于模型类别和导出
+chineseName   中文名称，用于人工校验界面
+description   标签说明
+createdAt     生成日期
+updatedAt     修改日期
+```
 
 ## API 概览
 
@@ -206,6 +225,10 @@ GET  /api/assets/{asset_id}/annotations
 PUT  /api/assets/{asset_id}/annotations
 POST /api/assets/{asset_id}/annotations/review
 GET  /api/assets/{asset_id}/export?format=json|coco|yolo
+GET  /api/labels
+POST /api/labels
+PUT  /api/labels/{label_id}
+DEL  /api/labels/{label_id}
 ```
 
 ## 标注 JSON

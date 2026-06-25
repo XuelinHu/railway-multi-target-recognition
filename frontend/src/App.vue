@@ -2,17 +2,28 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import {
   Boxes,
+  Check,
   ChevronLeft,
   ChevronRight,
+  Copy,
   Download,
+  Edit3,
   Image as ImageIcon,
   Loader2,
   Maximize2,
+  MousePointer2,
+  Move,
+  Pentagon,
+  Plus,
   RefreshCw,
   RotateCcw,
   Save,
+  Settings,
   Sparkles,
+  Tags,
+  Trash2,
   Upload,
+  Waypoints,
   ZoomIn,
 } from "@lucide/vue";
 import {
@@ -21,18 +32,27 @@ import {
   type ImageTaskResultVersion,
   type ImageTaskStatus,
   type ImageTaskType,
+  type LabelConfig,
   assetUrl,
   createImageTask,
+  createLabel,
+  deleteLabel,
   getTaskResult,
   getTaskResultVersion,
   inferImageTask,
-  listTaskResultVersions,
   listImages,
+  listLabels,
+  listTaskResultVersions,
   restoreTaskResultVersion,
   saveTaskResult,
   updateAnnotation,
+  updateLabel,
   uploadImage,
 } from "./api";
+
+type PageMode = "workspace" | "settings";
+type AnnotationTool = "select" | "pan" | "box" | "polygon" | "line";
+type ShapeType = "box" | "polygon" | "line";
 
 type TaskConfig = {
   type: ImageTaskType;
@@ -57,39 +77,26 @@ type TaskState = {
   isViewingHistory: boolean;
 };
 
+type Point = { x: number; y: number };
+type AnnotationShape = {
+  id: string;
+  type: ShapeType;
+  labelId: number | null;
+  label: string;
+  points: Point[];
+  score?: number;
+  source: "ai" | "manual" | "edited";
+};
+
 const taskConfigs: TaskConfig[] = [
-  {
-    type: "detection",
-    title: "目标检测",
-    description: "检测框、类别与置信度",
-    models: ["yolo11n", "yolov8n"],
-  },
-  {
-    type: "segmentation",
-    title: "实例分割",
-    description: "区域 mask、轮廓与类别",
-    models: ["yolo11n-seg"],
-  },
-  {
-    type: "pose",
-    title: "姿态识别",
-    description: "关键点与骨架连线",
-    models: ["yolo11n-pose"],
-  },
-  {
-    type: "classification",
-    title: "图像分类",
-    description: "分类标签与概率",
-    models: ["yolo11n-cls"],
-  },
-  {
-    type: "caption",
-    title: "图像描述",
-    description: "生成图片描述文本",
-    models: ["blip-image-captioning-base", "yolo-cls-fallback"],
-  },
+  { type: "detection", title: "目标检测", description: "检测框、类别与置信度", models: ["yolo11n", "yolov8n"] },
+  { type: "segmentation", title: "实例分割", description: "区域 mask、轮廓与类别", models: ["yolo11n-seg"] },
+  { type: "pose", title: "姿态识别", description: "关键点与骨架连线", models: ["yolo11n-pose"] },
+  { type: "classification", title: "图像分类", description: "分类标签与概率", models: ["yolo11n-cls"] },
+  { type: "caption", title: "图像描述", description: "生成图片描述文本", models: ["blip-image-captioning-base", "yolo-cls-fallback"] },
 ];
 
+const currentPage = ref<PageMode>("workspace");
 const currentTaskType = ref<ImageTaskType>("detection");
 const selectedModelByTask = reactive<Record<ImageTaskType, string>>({
   detection: "yolo11n",
@@ -98,12 +105,28 @@ const selectedModelByTask = reactive<Record<ImageTaskType, string>>({
   classification: "yolo11n-cls",
   caption: "blip-image-captioning-base",
 });
+
 const imageHistoryList = ref<ImageAsset[]>([]);
+const labels = ref<LabelConfig[]>([]);
 const loading = ref(false);
 const message = ref("");
 const historyCollapsed = ref(false);
 const thumbnailCollapsed = ref(false);
 const originalPreview = ref<ImageAsset | null>(null);
+const activeTool = ref<AnnotationTool>("select");
+const selectedShapeId = ref<string | null>(null);
+const draftShape = ref<AnnotationShape | null>(null);
+const polygonDraft = ref<Point[]>([]);
+const drawing = reactive({ active: false, mode: "" as "" | "draw" | "move" | "resize", shapeId: "", start: null as Point | null });
+
+const labelForm = reactive({
+  copyFromLabelId: "" as string,
+  englishName: "",
+  chineseName: "",
+  description: "",
+});
+const editingLabelId = ref<number | null>(null);
+const editingLabel = reactive({ englishName: "", chineseName: "", description: "" });
 
 const sessionId = getSessionId();
 const taskStates = reactive<Record<ImageTaskType, TaskState>>({
@@ -117,23 +140,45 @@ const taskStates = reactive<Record<ImageTaskType, TaskState>>({
 const currentState = computed(() => taskStates[currentTaskType.value]);
 const currentConfig = computed(() => taskConfigs.find((item) => item.type === currentTaskType.value) ?? taskConfigs[0]);
 const currentImageUrl = computed(() => assetUrl(currentState.value.imageUrl));
-
 const view = reactive({ zoom: 1, x: 0, y: 0, dragging: false, startX: 0, startY: 0, originX: 0, originY: 0 });
 
+const annotationShapes = computed(() => readShapes(currentState.value.annotationJson));
+const selectedShape = computed(() => annotationShapes.value.find((shape) => shape.id === selectedShapeId.value) ?? null);
+const selectedLabelId = computed({
+  get: () => selectedShape.value?.labelId ?? "",
+  set: (value: string | number) => {
+    if (!selectedShape.value) return;
+    if (value === "") {
+      updateShape(selectedShape.value.id, {
+        labelId: null,
+        label: selectedShape.value.label,
+        source: "edited",
+      });
+      return;
+    }
+    const label = labels.value.find((item) => item.labelId === Number(value));
+    updateShape(selectedShape.value.id, {
+      labelId: label?.labelId ?? null,
+      label: label ? `${label.englishName} / ${label.chineseName}` : selectedShape.value.label,
+      source: "edited",
+    });
+  },
+});
+
 onMounted(async () => {
-  await loadImageHistory();
+  await Promise.all([loadLabels(), loadImageHistory()]);
   const first = imageHistoryList.value[0];
   if (first) await selectImage(first);
 });
 
 async function setTaskType(taskType: ImageTaskType) {
   currentTaskType.value = taskType;
+  activeTool.value = "select";
+  selectedShapeId.value = null;
   message.value = "";
   await loadImageHistory();
   const state = currentState.value;
-  if (!state.currentImageId && imageHistoryList.value[0]) {
-    await selectImage(imageHistoryList.value[0]);
-  }
+  if (!state.currentImageId && imageHistoryList.value[0]) await selectImage(imageHistoryList.value[0]);
 }
 
 async function handleUpload(event: Event) {
@@ -141,13 +186,11 @@ async function handleUpload(event: Event) {
   const file = input.files?.[0];
   input.value = "";
   if (!file) return;
-
   const error = validateImage(file);
   if (error) {
     message.value = error;
     return;
   }
-
   await runBusy(async () => {
     const image = await uploadImage(file, currentTaskType.value, sessionId);
     await bindImageToCurrentTask(image);
@@ -182,7 +225,7 @@ async function runCurrentTask() {
   await runBusy(async () => {
     currentState.value.status = "processing";
     const result = await inferImageTask({
-      imageId: currentState.value.currentImageId!,
+      imageId: currentState.value.currentImageId,
       taskType: currentTaskType.value,
       sessionId,
       modelName: selectedModelByTask[currentTaskType.value],
@@ -190,7 +233,7 @@ async function runCurrentTask() {
     applyTaskResult(result);
     await loadCurrentVersions();
     await loadImageHistory();
-    message.value = "AI 结果已生成并保存";
+    message.value = "AI 结果已生成并保存，可继续人工校验";
   }, "AI 任务执行失败");
 }
 
@@ -205,6 +248,7 @@ async function saveCurrentResult() {
       ? { taskId: state.taskId }
       : await createImageTask({ imageId: state.currentImageId!, taskType: currentTaskType.value, sessionId });
     state.taskId = task.taskId;
+    ensureAnnotationJson();
     await saveTaskResult({
       taskId: state.taskId,
       imageId: state.currentImageId,
@@ -224,11 +268,16 @@ async function saveCurrentResult() {
 
 async function saveAnnotationSnapshot() {
   const state = currentState.value;
-  if (!state.taskId || !state.currentImageId || !state.annotationJson) {
-    message.value = "当前没有可保存的标注";
+  if (!state.currentImageId) {
+    message.value = "请先上传或选择图片";
     return;
   }
   await runBusy(async () => {
+    if (!state.taskId) {
+      const task = await createImageTask({ imageId: state.currentImageId!, taskType: currentTaskType.value, sessionId });
+      state.taskId = task.taskId;
+    }
+    ensureAnnotationJson();
     const result = await updateAnnotation({
       taskId: state.taskId!,
       imageId: state.currentImageId!,
@@ -258,7 +307,7 @@ function applyTaskResult(result: ImageTaskResult | null) {
     state.taskId = null;
     state.resultImageUrl = "";
     state.resultJson = null;
-    state.annotationJson = null;
+    state.annotationJson = emptyAnnotation();
     state.descriptionText = "";
     state.status = "idle";
     state.activeVersionId = null;
@@ -269,12 +318,13 @@ function applyTaskResult(result: ImageTaskResult | null) {
   state.taskId = result.taskId;
   state.resultImageUrl = result.resultImageUrl || "";
   state.resultJson = (result.resultJson as Record<string, unknown> | null) ?? null;
-  state.annotationJson = (result.annotationJson as Record<string, unknown> | null) ?? null;
+  state.annotationJson = normalizeAnnotation(result.annotationJson as Record<string, unknown> | null, state.resultJson);
   state.descriptionText = result.descriptionText || "";
   state.status = result.status || "success";
   state.activeVersionId = result.latestVersionId || null;
   state.latestVersionNo = result.latestVersionNo || null;
   state.isViewingHistory = false;
+  selectedShapeId.value = null;
 }
 
 async function loadCurrentVersions() {
@@ -283,11 +333,7 @@ async function loadCurrentVersions() {
     state.versions = [];
     return;
   }
-  state.versions = await listTaskResultVersions({
-    imageId: state.currentImageId,
-    taskType: currentTaskType.value,
-    sessionId,
-  });
+  state.versions = await listTaskResultVersions({ imageId: state.currentImageId, taskType: currentTaskType.value, sessionId });
   if (!state.activeVersionId && state.versions[0]) {
     state.activeVersionId = state.versions[0].versionId;
     state.latestVersionNo = state.versions[0].versionNo;
@@ -301,11 +347,12 @@ async function viewVersion(versionId: string) {
     state.taskId = version.taskId;
     state.resultImageUrl = version.resultImageUrl || "";
     state.resultJson = (version.resultJson as Record<string, unknown> | null) ?? null;
-    state.annotationJson = (version.annotationJson as Record<string, unknown> | null) ?? null;
+    state.annotationJson = normalizeAnnotation(version.annotationJson as Record<string, unknown> | null, state.resultJson);
     state.descriptionText = version.descriptionText || "";
     state.status = "success";
     state.activeVersionId = version.versionId;
     state.isViewingHistory = state.latestVersionNo !== version.versionNo;
+    selectedShapeId.value = null;
     message.value = `正在查看历史版本 v${version.versionNo}`;
   }, "历史版本加载失败");
 }
@@ -327,13 +374,382 @@ async function bindImageToCurrentTask(image: ImageAsset) {
   state.imageInfo = image;
   state.resultImageUrl = "";
   state.resultJson = null;
-  state.annotationJson = null;
+  state.annotationJson = emptyAnnotation();
   state.descriptionText = "";
   state.status = "idle";
   state.versions = [];
   state.activeVersionId = null;
   state.latestVersionNo = null;
   state.isViewingHistory = false;
+  selectedShapeId.value = null;
+}
+
+async function loadLabels() {
+  await runBusy(async () => {
+    labels.value = await listLabels();
+  }, "标签加载失败");
+}
+
+function applyLabelTemplate() {
+  const id = Number(labelForm.copyFromLabelId);
+  const template = labels.value.find((label) => label.labelId === id);
+  if (!template) return;
+  labelForm.englishName = `${template.englishName}_copy`;
+  labelForm.chineseName = `${template.chineseName}副本`;
+  labelForm.description = template.description;
+}
+
+async function submitLabel() {
+  await runBusy(async () => {
+    await createLabel({
+      englishName: labelForm.englishName.trim(),
+      chineseName: labelForm.chineseName.trim(),
+      description: labelForm.description.trim(),
+      copyFromLabelId: labelForm.copyFromLabelId === "" ? null : Number(labelForm.copyFromLabelId),
+    });
+    labelForm.copyFromLabelId = "";
+    labelForm.englishName = "";
+    labelForm.chineseName = "";
+    labelForm.description = "";
+    await loadLabels();
+    message.value = "标签已新增";
+  }, "新增标签失败");
+}
+
+function startEditLabel(label: LabelConfig) {
+  editingLabelId.value = label.labelId;
+  editingLabel.englishName = label.englishName;
+  editingLabel.chineseName = label.chineseName;
+  editingLabel.description = label.description;
+}
+
+async function submitEditLabel(labelId: number) {
+  await runBusy(async () => {
+    await updateLabel(labelId, {
+      englishName: editingLabel.englishName.trim(),
+      chineseName: editingLabel.chineseName.trim(),
+      description: editingLabel.description.trim(),
+    });
+    editingLabelId.value = null;
+    await loadLabels();
+    message.value = "标签已更新";
+  }, "更新标签失败");
+}
+
+async function removeLabel(labelId: number) {
+  await runBusy(async () => {
+    await deleteLabel(labelId);
+    if (selectedShape.value?.labelId === labelId) selectedShapeId.value = null;
+    await loadLabels();
+    message.value = "标签已删除";
+  }, "删除标签失败");
+}
+
+function setTool(tool: AnnotationTool) {
+  activeTool.value = tool;
+  draftShape.value = null;
+  polygonDraft.value = [];
+  drawing.active = false;
+}
+
+function onStagePointerDown(event: PointerEvent) {
+  if (activeTool.value !== "pan" || !currentState.value.imageUrl) return;
+  view.dragging = true;
+  view.startX = event.clientX;
+  view.startY = event.clientY;
+  view.originX = view.x;
+  view.originY = view.y;
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+function onStagePointerMove(event: PointerEvent) {
+  if (!view.dragging) return;
+  view.x = view.originX + event.clientX - view.startX;
+  view.y = view.originY + event.clientY - view.startY;
+}
+
+function stopStageDrag() {
+  view.dragging = false;
+}
+
+function onOverlayPointerDown(event: PointerEvent) {
+  if (!currentState.value.imageInfo || activeTool.value === "pan") return;
+  const point = svgPoint(event);
+  if (!point) return;
+  if (activeTool.value === "select") {
+    selectedShapeId.value = null;
+    return;
+  }
+  if (activeTool.value === "polygon") {
+    polygonDraft.value = [...polygonDraft.value, point];
+    return;
+  }
+  draftShape.value = makeShape(activeTool.value === "line" ? "line" : "box", [point, point]);
+  drawing.active = true;
+  drawing.mode = "draw";
+  drawing.start = point;
+}
+
+function onOverlayPointerMove(event: PointerEvent) {
+  const point = svgPoint(event);
+  if (!point) return;
+  if (draftShape.value && drawing.mode === "draw") {
+    draftShape.value = { ...draftShape.value, points: [draftShape.value.points[0], point] };
+    return;
+  }
+  if (drawing.mode === "move" && drawing.start) moveSelectedShape(point);
+  if (drawing.mode === "resize" && drawing.start) resizeSelectedBox(point);
+}
+
+function onOverlayPointerUp() {
+  if (draftShape.value && drawing.mode === "draw") {
+    const shape = normalizeShapePoints(draftShape.value);
+    if (shapeSize(shape) > 6) addShape(shape);
+    draftShape.value = null;
+  }
+  drawing.active = false;
+  drawing.mode = "";
+  drawing.start = null;
+}
+
+function finishPolygon() {
+  if (polygonDraft.value.length < 3) {
+    message.value = "多边形至少需要 3 个点";
+    return;
+  }
+  addShape(makeShape("polygon", polygonDraft.value));
+  polygonDraft.value = [];
+  activeTool.value = "select";
+}
+
+function cancelPolygon() {
+  polygonDraft.value = [];
+}
+
+function startMoveShape(event: PointerEvent, shapeId: string) {
+  if (activeTool.value !== "select") return;
+  const point = svgPoint(event);
+  if (!point) return;
+  selectedShapeId.value = shapeId;
+  drawing.active = true;
+  drawing.mode = "move";
+  drawing.shapeId = shapeId;
+  drawing.start = point;
+}
+
+function startResizeBox(event: PointerEvent, shapeId: string) {
+  const point = svgPoint(event);
+  if (!point) return;
+  selectedShapeId.value = shapeId;
+  drawing.active = true;
+  drawing.mode = "resize";
+  drawing.shapeId = shapeId;
+  drawing.start = point;
+}
+
+function moveSelectedShape(point: Point) {
+  const shape = annotationShapes.value.find((item) => item.id === drawing.shapeId);
+  if (!shape || !drawing.start) return;
+  const dx = point.x - drawing.start.x;
+  const dy = point.y - drawing.start.y;
+  drawing.start = point;
+  updateShape(shape.id, {
+    points: shape.points.map((item) => clampPoint({ x: item.x + dx, y: item.y + dy })),
+    source: "edited",
+  });
+}
+
+function resizeSelectedBox(point: Point) {
+  const shape = annotationShapes.value.find((item) => item.id === drawing.shapeId);
+  if (!shape || shape.type !== "box") return;
+  updateShape(shape.id, { points: [shape.points[0], clampPoint(point)], source: "edited" });
+}
+
+function addShape(shape: AnnotationShape) {
+  setShapes([...annotationShapes.value, shape]);
+  selectedShapeId.value = shape.id;
+  activeTool.value = "select";
+}
+
+function updateShape(shapeId: string, patch: Partial<AnnotationShape>) {
+  setShapes(annotationShapes.value.map((shape) => (shape.id === shapeId ? { ...shape, ...patch } : shape)));
+}
+
+function removeSelectedShape() {
+  if (!selectedShapeId.value) return;
+  setShapes(annotationShapes.value.filter((shape) => shape.id !== selectedShapeId.value));
+  selectedShapeId.value = null;
+}
+
+function setShapes(shapes: AnnotationShape[]) {
+  currentState.value.annotationJson = {
+    ...(currentState.value.annotationJson ?? emptyAnnotation()),
+    shapes: shapes.map((shape) => serializeShape(shape)),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function ensureAnnotationJson() {
+  currentState.value.annotationJson = normalizeAnnotation(currentState.value.annotationJson, currentState.value.resultJson);
+}
+
+function emptyAnnotation() {
+  return { shapes: [], updatedAt: new Date().toISOString() };
+}
+
+function normalizeAnnotation(annotation: Record<string, unknown> | null, result: Record<string, unknown> | null) {
+  const shapes = readShapes(annotation);
+  if (shapes.length > 0) return { ...(annotation ?? {}), shapes: shapes.map((shape) => serializeShape(shape)) };
+  return { ...(annotation ?? {}), shapes: resultToShapes(result).map((shape) => serializeShape(shape)), updatedAt: new Date().toISOString() };
+}
+
+function resultToShapes(result: Record<string, unknown> | null): AnnotationShape[] {
+  const boxes = ((result?.boxes as Array<Record<string, unknown>> | undefined) ?? []).map((box) => {
+    const label = String(box.label ?? "object");
+    return makeShape(
+      "box",
+      [
+        { x: Number(box.x ?? 0), y: Number(box.y ?? 0) },
+        { x: Number(box.x ?? 0) + Number(box.width ?? 0), y: Number(box.y ?? 0) + Number(box.height ?? 0) },
+      ],
+      label,
+      Number(box.score ?? 0),
+      "ai",
+    );
+  });
+  const segments = ((result?.segments as Array<Record<string, unknown>> | undefined) ?? []).map((segment) => {
+    const points = ((segment.polygon as number[][] | undefined) ?? []).map(([x, y]) => ({ x: Number(x), y: Number(y) }));
+    return makeShape("polygon", points, String(segment.label ?? "segment"), Number(segment.score ?? 0), "ai");
+  });
+  return [...boxes, ...segments].filter((shape) => shape.points.length >= 2);
+}
+
+function readShapes(annotation: Record<string, unknown> | null): AnnotationShape[] {
+  const raw = ((annotation?.shapes as Array<Record<string, unknown>> | undefined) ?? []) as Array<Record<string, unknown>>;
+  return raw
+    .map((shape) => ({
+      id: String(shape.id ?? newId("shape")),
+      type: (shape.type === "polygon" || shape.type === "line" ? shape.type : "box") as ShapeType,
+      labelId: shape.labelId === null || shape.labelId === undefined ? null : Number(shape.labelId),
+      label: String(shape.label ?? "object"),
+      points: ((shape.points as Array<Record<string, number>> | undefined) ?? []).map((point) => ({ x: Number(point.x), y: Number(point.y) })),
+      score: shape.score === undefined ? undefined : Number(shape.score),
+      source: shape.source === "ai" ? "ai" : shape.source === "manual" ? "manual" : "edited",
+    }))
+    .filter((shape) => shape.points.length >= 2 || shape.type === "polygon");
+}
+
+function serializeShape(shape: AnnotationShape) {
+  return {
+    id: shape.id,
+    type: shape.type,
+    labelId: shape.labelId,
+    label: shape.label,
+    points: shape.points.map((point) => ({ x: round(point.x), y: round(point.y) })),
+    score: shape.score,
+    source: shape.source,
+  };
+}
+
+function makeShape(type: ShapeType, points: Point[], label = defaultLabelText(), score?: number, source: AnnotationShape["source"] = "manual") {
+  const labelConfig = source === "ai" ? labels.value.find((item) => item.englishName === label) : labels.value[0];
+  return {
+    id: newId("shape"),
+    type,
+    labelId: labelConfig?.labelId ?? null,
+    label: labelConfig ? `${labelConfig.englishName} / ${labelConfig.chineseName}` : label,
+    points: points.map(clampPoint),
+    score,
+    source,
+  };
+}
+
+function normalizeShapePoints(shape: AnnotationShape) {
+  if (shape.type !== "box") return { ...shape, points: shape.points.map(clampPoint) };
+  const [a, b] = shape.points;
+  return { ...shape, points: [clampPoint({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y) }), clampPoint({ x: Math.max(a.x, b.x), y: Math.max(a.y, b.y) })] };
+}
+
+function shapeSize(shape: AnnotationShape) {
+  if (shape.type === "line") return distance(shape.points[0], shape.points[1]);
+  const box = shapeBounds(shape);
+  return Math.max(box.width, box.height);
+}
+
+function shapeBounds(shape: AnnotationShape) {
+  const xs = shape.points.map((point) => point.x);
+  const ys = shape.points.map((point) => point.y);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+}
+
+function svgPoint(event: PointerEvent): Point | null {
+  const svg = event.currentTarget instanceof SVGSVGElement ? event.currentTarget : (event.currentTarget as Element).closest("svg");
+  if (!svg || !currentState.value.imageInfo?.width || !currentState.value.imageInfo?.height) return null;
+  const rect = svg.getBoundingClientRect();
+  return clampPoint({
+    x: ((event.clientX - rect.left) / rect.width) * currentState.value.imageInfo.width,
+    y: ((event.clientY - rect.top) / rect.height) * currentState.value.imageInfo.height,
+  });
+}
+
+function clampPoint(point: Point) {
+  const width = currentState.value.imageInfo?.width ?? Number.MAX_SAFE_INTEGER;
+  const height = currentState.value.imageInfo?.height ?? Number.MAX_SAFE_INTEGER;
+  return { x: Math.min(width, Math.max(0, point.x)), y: Math.min(height, Math.max(0, point.y)) };
+}
+
+function boxRect(shape: AnnotationShape) {
+  const box = shapeBounds(shape);
+  return { ...box, labelY: Math.max(box.y - 8, 16), handleX: box.x + box.width, handleY: box.y + box.height };
+}
+
+function polygonPoints(points: Point[]) {
+  return points.map((point) => `${point.x},${point.y}`).join(" ");
+}
+
+function linePoints(points: Point[]) {
+  return points.length >= 2 ? { x1: points[0].x, y1: points[0].y, x2: points[1].x, y2: points[1].y } : { x1: 0, y1: 0, x2: 0, y2: 0 };
+}
+
+function resultKeypoints() {
+  return ((currentState.value.resultJson?.keypoints as Array<Record<string, number | string>> | undefined) ?? []) as Array<{
+    name: string;
+    x: number;
+    y: number;
+    score: number;
+  }>;
+}
+
+function resultLabels() {
+  return ((currentState.value.resultJson?.labels as Array<Record<string, number | string>> | undefined) ?? []) as Array<{
+    label: string;
+    score: number;
+  }>;
+}
+
+function onWheel(event: WheelEvent) {
+  if (!currentState.value.imageUrl) return;
+  event.preventDefault();
+  const direction = event.deltaY > 0 ? -0.12 : 0.12;
+  view.zoom = Math.min(5, Math.max(0.2, Number((view.zoom + direction).toFixed(2))));
+}
+
+function resetView() {
+  view.zoom = 1;
+  view.x = 0;
+  view.y = 0;
+}
+
+function fitView() {
+  view.zoom = 0.9;
+  view.x = 0;
+  view.y = 0;
+}
+
+function originalView() {
+  resetView();
 }
 
 async function runBusy(action: () => Promise<void>, fallback: string) {
@@ -364,7 +780,7 @@ function createDefaultTaskState(): TaskState {
     taskId: null,
     resultImageUrl: "",
     resultJson: null,
-    annotationJson: null,
+    annotationJson: emptyAnnotation(),
     descriptionText: "",
     status: "idle",
     versions: [],
@@ -387,6 +803,22 @@ function getSessionId() {
   return created;
 }
 
+function defaultLabelText() {
+  return "object / 对象";
+}
+
+function newId(prefix: string) {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function round(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+function distance(a: Point, b: Point) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
 function formatBytes(value?: number | null) {
   if (!value) return "-";
   if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
@@ -399,93 +831,7 @@ function formatTime(value?: string) {
 }
 
 function statusText(status: ImageTaskStatus) {
-  return {
-    idle: "未处理",
-    pending: "待处理",
-    processing: "处理中",
-    success: "已完成",
-    failed: "失败",
-  }[status];
-}
-
-function resultBoxes() {
-  return ((currentState.value.resultJson?.boxes as Array<Record<string, number | string>> | undefined) ?? []) as Array<{
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    label: string;
-    score: number;
-  }>;
-}
-
-function resultSegments() {
-  return ((currentState.value.resultJson?.segments as Array<Record<string, unknown>> | undefined) ?? []) as Array<{
-    label: string;
-    score: number;
-    polygon: number[][];
-  }>;
-}
-
-function resultKeypoints() {
-  return ((currentState.value.resultJson?.keypoints as Array<Record<string, number | string>> | undefined) ?? []) as Array<{
-    name: string;
-    x: number;
-    y: number;
-    score: number;
-  }>;
-}
-
-function resultLabels() {
-  return ((currentState.value.resultJson?.labels as Array<Record<string, number | string>> | undefined) ?? []) as Array<{
-    label: string;
-    score: number;
-  }>;
-}
-
-function onWheel(event: WheelEvent) {
-  if (!currentState.value.imageUrl) return;
-  event.preventDefault();
-  const direction = event.deltaY > 0 ? -0.12 : 0.12;
-  view.zoom = Math.min(4, Math.max(0.25, Number((view.zoom + direction).toFixed(2))));
-}
-
-function startDrag(event: PointerEvent) {
-  if (!currentState.value.imageUrl) return;
-  view.dragging = true;
-  view.startX = event.clientX;
-  view.startY = event.clientY;
-  view.originX = view.x;
-  view.originY = view.y;
-  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-}
-
-function drag(event: PointerEvent) {
-  if (!view.dragging) return;
-  view.x = view.originX + event.clientX - view.startX;
-  view.y = view.originY + event.clientY - view.startY;
-}
-
-function stopDrag() {
-  view.dragging = false;
-}
-
-function resetView() {
-  view.zoom = 1;
-  view.x = 0;
-  view.y = 0;
-}
-
-function fitView() {
-  view.zoom = 0.9;
-  view.x = 0;
-  view.y = 0;
-}
-
-function originalView() {
-  view.zoom = 1;
-  view.x = 0;
-  view.y = 0;
+  return { idle: "未处理", pending: "待处理", processing: "处理中", success: "已完成", failed: "失败" }[status];
 }
 </script>
 
@@ -499,19 +845,13 @@ function originalView() {
           <span>{{ loading ? "处理中" : "就绪" }}<template v-if="message"> · {{ message }}</template></span>
         </div>
       </div>
-      <nav class="task-tabs" aria-label="图像任务">
-        <button
-          v-for="task in taskConfigs"
-          :key="task.type"
-          :class="{ active: currentTaskType === task.type }"
-          @click="setTaskType(task.type)"
-        >
-          {{ task.title }}
-        </button>
+      <nav class="task-tabs" aria-label="工作区">
+        <button :class="{ active: currentPage === 'workspace' }" @click="currentPage = 'workspace'"><Boxes :size="16" />标注工作台</button>
+        <button :class="{ active: currentPage === 'settings' }" @click="currentPage = 'settings'"><Settings :size="16" />系统配置</button>
       </nav>
     </header>
 
-    <section class="workspace-body">
+    <section v-if="currentPage === 'workspace'" class="workspace-body">
       <aside class="history-panel" :class="{ collapsed: historyCollapsed }">
         <div class="panel-head">
           <strong v-if="!historyCollapsed">历史图片</strong>
@@ -521,14 +861,17 @@ function originalView() {
           </button>
         </div>
         <template v-if="!historyCollapsed">
+          <div class="task-mini-tabs">
+            <button v-for="task in taskConfigs" :key="task.type" :class="{ active: currentTaskType === task.type }" @click="setTaskType(task.type)">
+              {{ task.title }}
+            </button>
+          </div>
           <label class="upload-zone compact">
             <Upload :size="18" />
             <span>上传图片</span>
             <input type="file" accept="image/jpeg,image/png,image/webp,image/bmp" @change="handleUpload" />
           </label>
-          <button class="ghost-button" :disabled="loading" @click="loadImageHistory">
-            <RefreshCw :size="16" /> 刷新历史
-          </button>
+          <button class="ghost-button" :disabled="loading" @click="loadImageHistory"><RefreshCw :size="16" /> 刷新历史</button>
           <div class="history-list">
             <button
               v-for="image in imageHistoryList"
@@ -554,37 +897,42 @@ function originalView() {
           <div>
             <strong>{{ currentConfig.title }}</strong>
             <span>{{ currentConfig.description }}</span>
-        </div>
-        <div class="toolbar-actions">
-          <label class="model-select">
-            <span>模型</span>
-            <select v-model="selectedModelByTask[currentTaskType]" :disabled="loading">
-              <option v-for="model in currentConfig.models" :key="model" :value="model">
-                {{ model }}
-              </option>
-            </select>
-          </label>
-          <button :disabled="!currentState.currentImageId || loading" @click="runCurrentTask">
-            <Loader2 v-if="loading" class="spin" :size="16" />
-            <Sparkles v-else :size="16" />
+          </div>
+          <div class="toolbar-actions">
+            <label class="model-select">
+              <span>模型</span>
+              <select v-model="selectedModelByTask[currentTaskType]" :disabled="loading">
+                <option v-for="model in currentConfig.models" :key="model" :value="model">{{ model }}</option>
+              </select>
+            </label>
+            <button :disabled="!currentState.currentImageId || loading" @click="runCurrentTask">
+              <Loader2 v-if="loading" class="spin" :size="16" />
+              <Sparkles v-else :size="16" />
               开始处理
             </button>
-            <button :disabled="!currentState.currentImageId || loading" @click="saveCurrentResult">
-              <Save :size="16" /> 保存当前结果
-            </button>
-            <button :disabled="!currentState.annotationJson || loading" @click="saveAnnotationSnapshot">
-              <Download :size="16" /> 保存标注
-            </button>
+            <button :disabled="!currentState.currentImageId || loading" @click="saveCurrentResult"><Save :size="16" />保存结果</button>
+            <button :disabled="!currentState.currentImageId || loading" @click="saveAnnotationSnapshot"><Download :size="16" />保存标注</button>
           </div>
+        </div>
+
+        <div class="annotation-toolbar">
+          <button :class="{ active: activeTool === 'select' }" title="选择" @click="setTool('select')"><MousePointer2 :size="16" /></button>
+          <button :class="{ active: activeTool === 'pan' }" title="移动画布" @click="setTool('pan')"><Move :size="16" /></button>
+          <button :class="{ active: activeTool === 'box' }" title="矩形框" @click="setTool('box')"><Boxes :size="16" /></button>
+          <button :class="{ active: activeTool === 'polygon' }" title="多边形" @click="setTool('polygon')"><Pentagon :size="16" /></button>
+          <button :class="{ active: activeTool === 'line' }" title="线段" @click="setTool('line')"><Waypoints :size="16" /></button>
+          <button :disabled="polygonDraft.length < 3" @click="finishPolygon"><Check :size="16" />完成多边形</button>
+          <button :disabled="polygonDraft.length === 0" @click="cancelPolygon"><RotateCcw :size="16" />取消</button>
         </div>
 
         <div
           class="canvas-stage"
+          :class="`tool-${activeTool}`"
           @wheel="onWheel"
-          @pointerdown="startDrag"
-          @pointermove="drag"
-          @pointerup="stopDrag"
-          @pointerleave="stopDrag"
+          @pointerdown="onStagePointerDown"
+          @pointermove="onStagePointerMove"
+          @pointerup="stopStageDrag"
+          @pointerleave="stopStageDrag"
         >
           <div v-if="!currentState.imageUrl" class="empty-canvas">
             <ImageIcon :size="40" />
@@ -595,52 +943,78 @@ function originalView() {
             </label>
           </div>
 
-          <div
-            v-else
-            class="canvas-content"
-            :style="{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }"
-          >
+          <div v-else class="canvas-content" :style="{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }">
             <img class="base-image" :src="currentImageUrl" alt="原始图片" />
             <svg
               v-if="currentState.imageInfo?.width && currentState.imageInfo?.height"
-              class="overlay-layer"
+              class="overlay-layer interactive"
               :viewBox="`0 0 ${currentState.imageInfo.width} ${currentState.imageInfo.height}`"
+              @pointerdown.stop="onOverlayPointerDown"
+              @pointermove.stop="onOverlayPointerMove"
+              @pointerup.stop="onOverlayPointerUp"
+              @pointerleave.stop="onOverlayPointerUp"
+              @dblclick.stop="finishPolygon"
             >
-              <template v-if="currentTaskType === 'detection'">
-                <g v-for="(box, index) in resultBoxes()" :key="index">
-                  <rect class="box-shape" :x="box.x" :y="box.y" :width="box.width" :height="box.height" />
-                  <text class="box-label" :x="box.x + 4" :y="Math.max(box.y - 8, 16)">
-                    {{ box.label }} {{ Math.round(box.score * 100) }}%
-                  </text>
+              <template v-for="shape in annotationShapes" :key="shape.id">
+                <g
+                  v-if="shape.type === 'box'"
+                  class="shape-group"
+                  :class="{ selected: shape.id === selectedShapeId }"
+                  @pointerdown.stop="startMoveShape($event, shape.id)"
+                >
+                  <rect class="box-shape" :x="boxRect(shape).x" :y="boxRect(shape).y" :width="boxRect(shape).width" :height="boxRect(shape).height" />
+                  <text class="box-label" :x="boxRect(shape).x + 4" :y="boxRect(shape).labelY">{{ shape.label }}</text>
+                  <circle
+                    v-if="shape.id === selectedShapeId"
+                    class="resize-handle"
+                    :cx="boxRect(shape).handleX"
+                    :cy="boxRect(shape).handleY"
+                    r="9"
+                    @pointerdown.stop="startResizeBox($event, shape.id)"
+                  />
+                </g>
+                <g
+                  v-else-if="shape.type === 'polygon'"
+                  class="shape-group"
+                  :class="{ selected: shape.id === selectedShapeId }"
+                  @pointerdown.stop="startMoveShape($event, shape.id)"
+                >
+                  <polygon class="segment-shape" :points="polygonPoints(shape.points)" />
+                  <text class="box-label" :x="shapeBounds(shape).x + 4" :y="Math.max(shapeBounds(shape).y - 8, 16)">{{ shape.label }}</text>
+                </g>
+                <g v-else class="shape-group" :class="{ selected: shape.id === selectedShapeId }" @pointerdown.stop="startMoveShape($event, shape.id)">
+                  <line class="line-shape" v-bind="linePoints(shape.points)" />
+                  <text class="box-label" :x="shape.points[0].x + 4" :y="Math.max(shape.points[0].y - 8, 16)">{{ shape.label }}</text>
                 </g>
               </template>
-              <template v-if="currentTaskType === 'segmentation'">
-                <polygon
-                  v-for="(segment, index) in resultSegments()"
-                  :key="index"
-                  class="segment-shape"
-                  :points="segment.polygon.map((point) => point.join(',')).join(' ')"
-                />
-              </template>
-              <template v-if="currentTaskType === 'pose'">
-                <circle v-for="point in resultKeypoints()" :key="point.name" class="keypoint" :cx="point.x" :cy="point.y" r="8" />
-              </template>
+              <rect
+                v-if="draftShape?.type === 'box'"
+                class="draft-shape"
+                :x="boxRect(normalizeShapePoints(draftShape)).x"
+                :y="boxRect(normalizeShapePoints(draftShape)).y"
+                :width="boxRect(normalizeShapePoints(draftShape)).width"
+                :height="boxRect(normalizeShapePoints(draftShape)).height"
+              />
+              <line v-if="draftShape?.type === 'line'" class="draft-shape" v-bind="linePoints(draftShape.points)" />
+              <polyline v-if="polygonDraft.length > 0" class="draft-shape" :points="polygonPoints(polygonDraft)" />
+              <circle v-for="(point, index) in polygonDraft" :key="index" class="draft-point" :cx="point.x" :cy="point.y" r="6" />
+              <circle v-for="point in resultKeypoints()" :key="point.name" class="keypoint" :cx="point.x" :cy="point.y" r="7" />
             </svg>
           </div>
         </div>
 
         <div class="view-controls">
-          <button @click="fitView"><Maximize2 :size="15" /> 适应窗口</button>
-          <button @click="originalView"><ZoomIn :size="15" /> 原始比例</button>
-          <button @click="resetView"><RotateCcw :size="15" /> 重置视图</button>
+          <button @click="fitView"><Maximize2 :size="15" />适应窗口</button>
+          <button @click="originalView"><ZoomIn :size="15" />原始比例</button>
+          <button @click="resetView"><RotateCcw :size="15" />重置视图</button>
           <span>缩放 {{ Math.round(view.zoom * 100) }}%</span>
         </div>
       </section>
 
       <aside class="thumbnail-panel" :class="{ collapsed: thumbnailCollapsed }">
         <div class="panel-head">
-          <strong v-if="!thumbnailCollapsed">原图缩略图</strong>
-          <button :title="thumbnailCollapsed ? '展开原图信息' : '收起原图信息'" @click="thumbnailCollapsed = !thumbnailCollapsed">
+          <strong v-if="!thumbnailCollapsed">标签与属性</strong>
+          <button :title="thumbnailCollapsed ? '展开属性' : '收起属性'" @click="thumbnailCollapsed = !thumbnailCollapsed">
             <ChevronLeft v-if="thumbnailCollapsed" :size="16" />
             <ChevronRight v-else :size="16" />
           </button>
@@ -649,8 +1023,6 @@ function originalView() {
           <button v-if="currentState.imageInfo" class="thumbnail-card" @click="originalPreview = currentState.imageInfo">
             <img :src="currentImageUrl" alt="原图缩略图" />
           </button>
-          <div v-else class="empty-state">暂无原图</div>
-
           <dl v-if="currentState.imageInfo" class="image-info">
             <dt>文件名</dt>
             <dd>{{ currentState.imageInfo.originalName }}</dd>
@@ -658,15 +1030,30 @@ function originalView() {
             <dd>{{ currentState.imageInfo.width || "-" }} x {{ currentState.imageInfo.height || "-" }}</dd>
             <dt>大小</dt>
             <dd>{{ formatBytes(currentState.imageInfo.fileSize) }}</dd>
-            <dt>上传时间</dt>
-            <dd>{{ formatTime(currentState.imageInfo.createdAt) }}</dd>
           </dl>
 
           <section class="result-summary">
+            <h2>选中对象</h2>
+            <div v-if="!selectedShape" class="empty-state">选择或新增一个标注对象</div>
+            <template v-else>
+              <label class="field-label">
+                <span>标签</span>
+                <select v-model="selectedLabelId">
+                  <option value="">未配置</option>
+                  <option v-for="label in labels" :key="label.labelId" :value="label.labelId">
+                    #{{ label.labelId }} {{ label.englishName }} / {{ label.chineseName }}
+                  </option>
+                </select>
+              </label>
+              <div class="result-row"><strong>类型</strong><span>{{ selectedShape.type }}</span></div>
+              <div class="result-row"><strong>来源</strong><span>{{ selectedShape.source }}</span></div>
+              <button class="danger-button" @click="removeSelectedShape"><Trash2 :size="16" />删除标注</button>
+            </template>
+          </section>
+
+          <section class="result-summary">
             <h2>任务结果</h2>
-            <div v-if="currentState.isViewingHistory" class="history-viewing">
-              正在查看历史版本，恢复后会生成一个新版本。
-            </div>
+            <div v-if="currentState.isViewingHistory" class="history-viewing">正在查看历史版本，恢复后会生成一个新版本。</div>
             <div v-if="currentState.status === 'idle'" class="empty-state">当前图片暂无该任务结果</div>
             <template v-else-if="currentTaskType === 'classification'">
               <div v-for="item in resultLabels()" :key="item.label" class="result-row">
@@ -674,20 +1061,7 @@ function originalView() {
               </div>
             </template>
             <p v-else-if="currentTaskType === 'caption'" class="caption-text">{{ currentState.descriptionText || "暂无描述" }}</p>
-            <template v-else>
-              <div class="result-row">
-                <strong>{{ currentConfig.title }}</strong>
-                <span>
-                  {{
-                    currentTaskType === "detection"
-                      ? `${resultBoxes().length} 个目标`
-                      : currentTaskType === "segmentation"
-                        ? `${resultSegments().length} 个区域`
-                        : `${resultKeypoints().length} 个关键点`
-                  }}
-                </span>
-              </div>
-            </template>
+            <div v-else class="result-row"><strong>标注对象</strong><span>{{ annotationShapes.length }} 个</span></div>
           </section>
 
           <section class="result-summary version-summary">
@@ -701,23 +1075,73 @@ function originalView() {
                 :class="{ selected: version.versionId === currentState.activeVersionId }"
                 @click="viewVersion(version.versionId)"
               >
-                <span>
-                  <strong>v{{ version.versionNo }}</strong>
-                  <small>{{ version.source }} · {{ version.modelId || "-" }}</small>
-                </span>
+                <span><strong>v{{ version.versionNo }}</strong><small>{{ version.source }} · {{ version.modelId || "-" }}</small></span>
                 <small>{{ formatTime(version.createdAt) }}</small>
               </button>
             </div>
-            <button
-              class="ghost-button restore-button"
-              :disabled="!currentState.activeVersionId || !currentState.isViewingHistory || loading"
-              @click="restoreVersion(currentState.activeVersionId!)"
-            >
+            <button class="ghost-button restore-button" :disabled="!currentState.activeVersionId || !currentState.isViewingHistory || loading" @click="restoreVersion(currentState.activeVersionId!)">
               恢复此版本
             </button>
           </section>
         </template>
       </aside>
+    </section>
+
+    <section v-else class="settings-page">
+      <div class="settings-header">
+        <div>
+          <h2><Tags :size="22" />标签配置</h2>
+          <p>标签 ID 由系统从 0 开始生成，英文名用于模型和导出，中文名用于人工校验界面。</p>
+        </div>
+        <button :disabled="loading" @click="loadLabels"><RefreshCw :size="16" />刷新</button>
+      </div>
+
+      <form class="label-form" @submit.prevent="submitLabel">
+        <label class="field-label">
+          <span>复制已有标签</span>
+          <select v-model="labelForm.copyFromLabelId" @change="applyLabelTemplate">
+            <option value="">不复制</option>
+            <option v-for="label in labels" :key="label.labelId" :value="label.labelId">#{{ label.labelId }} {{ label.englishName }} / {{ label.chineseName }}</option>
+          </select>
+        </label>
+        <label class="field-label"><span>英文名称</span><input v-model="labelForm.englishName" required placeholder="person" /></label>
+        <label class="field-label"><span>中文名称</span><input v-model="labelForm.chineseName" required placeholder="行人" /></label>
+        <label class="field-label wide"><span>描述信息</span><textarea v-model="labelForm.description" rows="2" placeholder="标签使用范围、边界说明或审核标准"></textarea></label>
+        <button :disabled="loading"><Plus :size="16" />新增标签</button>
+      </form>
+
+      <div class="label-table">
+        <div class="label-table-head">
+          <span>ID</span><span>英文</span><span>中文</span><span>描述</span><span>生成日期</span><span>修改日期</span><span>操作</span>
+        </div>
+        <div v-if="labels.length === 0" class="empty-state table-empty">暂无标签配置</div>
+        <div v-for="label in labels" :key="label.labelId" class="label-row">
+          <span>#{{ label.labelId }}</span>
+          <template v-if="editingLabelId === label.labelId">
+            <input v-model="editingLabel.englishName" />
+            <input v-model="editingLabel.chineseName" />
+            <textarea v-model="editingLabel.description" rows="2"></textarea>
+            <span>{{ formatTime(label.createdAt) }}</span>
+            <span>{{ formatTime(label.updatedAt) }}</span>
+            <span class="row-actions">
+              <button @click="submitEditLabel(label.labelId)"><Save :size="15" /></button>
+              <button @click="editingLabelId = null"><RotateCcw :size="15" /></button>
+            </span>
+          </template>
+          <template v-else>
+            <span>{{ label.englishName }}</span>
+            <span>{{ label.chineseName }}</span>
+            <span>{{ label.description || "-" }}</span>
+            <span>{{ formatTime(label.createdAt) }}</span>
+            <span>{{ formatTime(label.updatedAt) }}</span>
+            <span class="row-actions">
+              <button title="编辑" @click="startEditLabel(label)"><Edit3 :size="15" /></button>
+              <button title="复制到新增表单" @click="labelForm.copyFromLabelId = String(label.labelId); applyLabelTemplate()"><Copy :size="15" /></button>
+              <button title="删除" @click="removeLabel(label.labelId)"><Trash2 :size="15" /></button>
+            </span>
+          </template>
+        </div>
+      </div>
     </section>
 
     <div v-if="originalPreview" class="modal-backdrop" @click="originalPreview = null">

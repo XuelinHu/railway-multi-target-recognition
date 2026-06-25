@@ -69,6 +69,15 @@ export type ImageTaskResultVersion = {
   createdAt: string;
 };
 
+export type LabelConfig = {
+  labelId: number;
+  englishName: string;
+  chineseName: string;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ApiEnvelope<T> = {
   code: number;
   message: string;
@@ -210,6 +219,42 @@ export function inferImageTask(data: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
+}
+
+export function listLabels(): Promise<LabelConfig[]> {
+  return apiData<LabelConfig[]>("/api/labels");
+}
+
+export function createLabel(data: {
+  englishName: string;
+  chineseName: string;
+  description: string;
+  copyFromLabelId?: number | null;
+}): Promise<LabelConfig> {
+  return apiData<LabelConfig>("/api/labels", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateLabel(
+  labelId: number,
+  data: {
+    englishName: string;
+    chineseName: string;
+    description: string;
+  },
+): Promise<LabelConfig> {
+  return apiData<LabelConfig>(`/api/labels/${labelId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteLabel(labelId: number): Promise<{ deleted: boolean }> {
+  return apiData<{ deleted: boolean }>(`/api/labels/${labelId}`, { method: "DELETE" });
 }
 
 export function assetUrl(path?: string | null): string {

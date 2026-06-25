@@ -156,6 +156,51 @@ def test_database_queue_claims_queued_task(monkeypatch, tmp_path):
     assert claimed.status == "running"
 
 
+def test_label_config_crud_uses_zero_based_ids(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'labels.db'}")
+    monkeypatch.setenv("INFERENCE_BACKEND", "mock")
+    monkeypatch.setenv("RUN_TASKS_INLINE", "true")
+    get_settings.cache_clear()
+    get_store.cache_clear()
+
+    client = TestClient(create_app())
+
+    created = client.post(
+        "/api/labels",
+        json={"englishName": "person", "chineseName": "行人", "description": "可见人体目标"},
+    )
+    assert created.status_code == 200
+    assert created.json()["data"]["labelId"] == 0
+
+    copied = client.post(
+        "/api/labels",
+        json={
+            "englishName": "worker",
+            "chineseName": "工作人员",
+            "description": "",
+            "copyFromLabelId": 0,
+        },
+    )
+    assert copied.status_code == 200
+    assert copied.json()["data"]["labelId"] == 1
+
+    updated = client.put(
+        "/api/labels/1",
+        json={"englishName": "worker", "chineseName": "工作人员", "description": "现场作业人员"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["data"]["description"] == "现场作业人员"
+
+    listed = client.get("/api/labels")
+    assert listed.status_code == 200
+    assert [label["labelId"] for label in listed.json()["data"]] == [0, 1]
+
+    deleted = client.delete("/api/labels/0")
+    assert deleted.status_code == 200
+    assert deleted.json()["data"]["deleted"] is True
+
+
 def test_real_vision_result_keeps_general_model_labels():
     result = _result_from_analysis(
         "detection",
