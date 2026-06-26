@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://deipss:CHANGE_ME@127.0.0.1:5432/railway_recognition"
     inference_backend: str = Field(default="mock", pattern="^(mock|ultralytics|tensorrt)$")
     model_path: str = ""
+    deepseek_vl2_model_path: str = "./models/deepseek-vl2-tiny"
+    deepseek_vl2_prompt: str = "请用中文简要描述这张图片的主要内容，并列出可见目标。"
     device: str = "0"
     run_tasks_inline: bool = False
     task_worker_enabled: bool = True

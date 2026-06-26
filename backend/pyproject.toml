@@ -5,12 +5,15 @@ description = "FastAPI backend for railway multi-target recognition and annotati
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
+    "huggingface-hub>=0.26.0",
     "pydantic-settings>=2.6.0",
     "python-multipart>=0.0.12",
     "pillow>=10.4.0",
     "opencv-python-headless>=4.10.0",
     "psycopg[binary]>=3.2.0",
     "sqlalchemy>=2.0.36",
+    "socksio>=1.0.0",
+    "transformers==4.38.2",
     "uvicorn[standard]>=0.32.0",
     "ultralytics>=8.4.70",
 ]

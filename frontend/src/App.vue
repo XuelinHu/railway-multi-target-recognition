@@ -94,7 +94,12 @@ const taskConfigs: TaskConfig[] = [
   { type: "segmentation", title: "实例分割", description: "区域 mask、轮廓与类别", models: ["yolo11n-seg"] },
   { type: "pose", title: "姿态识别", description: "关键点与骨架连线", models: ["yolo11n-pose"] },
   { type: "classification", title: "图像分类", description: "分类标签与概率", models: ["yolo11n-cls"] },
-  { type: "caption", title: "图像描述", description: "生成图片描述文本", models: ["blip-image-captioning-base", "yolo-cls-fallback"] },
+  {
+    type: "caption",
+    title: "图像描述",
+    description: "生成图片描述文本",
+    models: ["deepseek-vl2-tiny", "blip-image-captioning-base", "yolo-cls-fallback"],
+  },
 ];
 
 const currentPage = ref<PageMode>("workspace");
@@ -104,7 +109,7 @@ const selectedModelByTask = reactive<Record<ImageTaskType, string>>({
   segmentation: "yolo11n-seg",
   pose: "yolo11n-pose",
   classification: "yolo11n-cls",
-  caption: "blip-image-captioning-base",
+  caption: "deepseek-vl2-tiny",
 });
 
 const imageHistoryList = ref<ImageAsset[]>([]);

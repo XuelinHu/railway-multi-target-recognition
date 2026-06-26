@@ -25,6 +25,7 @@
 - 人工校验支持通过、驳回、目标级确认、编辑和剔除。
 - Web 标注区参考 makeSense.ai 的工作台形态，支持选择、移动画布、矩形框、多边形、线段和缩放查看。
 - 检测框支持新增、拖动和右下角缩放。
+- 图像描述默认接入本地 `deepseek-ai/deepseek-vl2-tiny`，用于图片理解和可见目标描述。
 - 系统配置提供标签管理，标签包含从 0 开始生成的 ID、英文名称、中文名称、描述、生成日期和修改日期。
 - JSON、COCO、YOLO 三种格式导出。
 - Vue 前端工作台，提供上传、逐帧预览、检测框叠加、人工校验和导出入口。
@@ -185,6 +186,45 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8010
 ```
 
 TensorRT engine 与构建机器的 GPU、CUDA 和 TensorRT 版本相关，建议直接在 RTX 3090 运行环境中生成。
+
+## 图片理解模型
+
+图像描述功能默认使用 `deepseek-ai/deepseek-vl2-tiny`，前端“图像描述”模型下拉会默认选择 `deepseek-vl2-tiny`。模型文件放在：
+
+```text
+backend/models/deepseek-vl2-tiny
+```
+
+该目录已加入 `.gitignore`，不会提交 6GB 级别的本地权重文件。后端通过以下环境变量配置本地模型与提示词：
+
+```text
+DEEPSEEK_VL2_MODEL_PATH=./models/deepseek-vl2-tiny
+DEEPSEEK_VL2_PROMPT=请用中文简要描述这张图片的主要内容，并列出可见目标。
+```
+
+GPU 环境安装依赖：
+
+```bash
+cd backend
+uv pip install -r requirements-gpu.txt
+uv pip install --no-deps git+https://github.com/deepseek-ai/DeepSeek-VL2.git
+```
+
+DeepSeek-VL2 上游包固定了较旧的 `torch` 版本，在当前 Python 3.13 环境直接解析依赖会失败，因此这里用 `--no-deps` 安装代码包，并复用当前环境中的 PyTorch、CUDA 与 3090 驱动栈。
+
+如需重新下载模型，可使用 Hugging Face 或镜像源下载到同一目录：
+
+```bash
+cd backend
+uv run python - <<'PY'
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    "deepseek-ai/deepseek-vl2-tiny",
+    local_dir="models/deepseek-vl2-tiny",
+)
+PY
+```
 
 ## 人工标注工作台
 

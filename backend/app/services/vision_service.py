@@ -32,6 +32,8 @@ MODEL_ALIASES: dict[str, str] = {
     "railway-scene-cls": "yolo11n-cls.pt",
     "resnet50": "yolo11n-cls.pt",
     "efficientnet-b0": "yolo11n-cls.pt",
+    "deepseek-vl2-tiny": "deepseek-ai/deepseek-vl2-tiny",
+    "deepseek-ai/deepseek-vl2-tiny": "deepseek-ai/deepseek-vl2-tiny",
     "blip-image-captioning-base": "Salesforce/blip-image-captioning-base",
     "yolo-cls-fallback": "yolo11n-cls.pt",
     "custom-caption": "Salesforce/blip-image-captioning-base",
@@ -44,6 +46,9 @@ class VisionService:
         self._yolo_models: dict[str, Any] = {}
         self._caption_model: Any | None = None
         self._caption_processor: Any | None = None
+        self._deepseek_vl2_model: Any | None = None
+        self._deepseek_vl2_processor: Any | None = None
+        self._deepseek_vl2_tokenizer: Any | None = None
 
     def analyze_upload(
         self,
@@ -153,11 +158,16 @@ class VisionService:
             rgb_image = image.convert("RGB")
             width, height = rgb_image.size
             try:
-                model, processor = self._load_caption_model()
-                inputs = processor(rgb_image, return_tensors="pt").to(model.device)
-                outputs = model.generate(**inputs, max_new_tokens=40)
-                text = processor.decode(outputs[0], skip_special_tokens=True)
-                used_model = model_name or DEFAULT_MODELS["caption"]
+                resolved_model = MODEL_ALIASES.get(model_name or "", model_name or DEFAULT_MODELS["caption"])
+                if resolved_model == "deepseek-ai/deepseek-vl2-tiny":
+                    text = self._deepseek_vl2_caption(image_path)
+                    used_model = "deepseek-ai/deepseek-vl2-tiny"
+                else:
+                    model, processor = self._load_caption_model()
+                    inputs = processor(rgb_image, return_tensors="pt").to(model.device)
+                    outputs = model.generate(**inputs, max_new_tokens=40)
+                    text = processor.decode(outputs[0], skip_special_tokens=True)
+                    used_model = model_name or DEFAULT_MODELS["caption"]
             except Exception:
                 classified = self._yolo("classification", image_path, "yolo11n-cls").get("results", [])[:3]
                 labels = [item["label"] for item in classified]
@@ -201,6 +211,115 @@ class VisionService:
         self._caption_model = BlipForConditionalGeneration.from_pretrained(model_name)
         return self._caption_model, self._caption_processor
 
+    def _deepseek_vl2_caption(self, image_path: Path) -> str:
+        model, processor, tokenizer = self._load_deepseek_vl2_model()
+        conversation = [
+            {
+                "role": "<|User|>",
+                "content": f"<image>\n{self.settings.deepseek_vl2_prompt}",
+                "images": [str(image_path)],
+            },
+            {"role": "<|Assistant|>", "content": ""},
+        ]
+        try:
+            import torch
+            from deepseek_vl2.utils.io import load_pil_images
+        except Exception as exc:
+            raise RuntimeError("当前 Python 环境未安装 DeepSeek-VL2 代码包，无法执行 deepseek-vl2-tiny 图片理解") from exc
+
+        self._patch_xformers_attention()
+        pil_images = load_pil_images(conversation)
+        prepare_inputs = processor(
+            conversations=conversation,
+            images=pil_images,
+            force_batchify=True,
+            system_prompt="",
+        ).to(model.device)
+        with torch.inference_mode():
+            inputs_embeds = model.prepare_inputs_embeds(**prepare_inputs)
+            language_model = getattr(model, "language_model", None) or getattr(model, "language")
+            outputs = language_model.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=prepare_inputs.attention_mask,
+                pad_token_id=tokenizer.eos_token_id,
+                bos_token_id=tokenizer.bos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                max_new_tokens=256,
+                do_sample=False,
+                use_cache=True,
+            )
+        return tokenizer.decode(outputs[0].detach().cpu().tolist(), skip_special_tokens=True).strip()
+
+    def _patch_xformers_attention(self) -> None:
+        try:
+            import torch
+            import xformers.ops as xformers_ops
+        except Exception as exc:
+            raise RuntimeError("当前 Python 环境缺少 xformers，无法执行 deepseek-vl2-tiny 视觉注意力") from exc
+
+        if getattr(xformers_ops.memory_efficient_attention, "_railway_torch_fallback", False):
+            return
+
+        def torch_attention(
+            query: Any,
+            key: Any,
+            value: Any,
+            attn_bias: Any = None,
+            p: float = 0.0,
+            scale: float | None = None,
+            **_: Any,
+        ) -> Any:
+            if attn_bias is not None:
+                raise RuntimeError("deepseek-vl2-tiny 当前仅支持无 attn_bias 的 PyTorch 注意力回退")
+            query_t = query.transpose(1, 2)
+            key_t = key.transpose(1, 2)
+            value_t = value.transpose(1, 2)
+            output = torch.nn.functional.scaled_dot_product_attention(
+                query_t,
+                key_t,
+                value_t,
+                dropout_p=p,
+                scale=scale,
+            )
+            return output.transpose(1, 2).contiguous()
+
+        torch_attention._railway_torch_fallback = True  # type: ignore[attr-defined]
+        xformers_ops.memory_efficient_attention = torch_attention
+
+    def _load_deepseek_vl2_model(self) -> tuple[Any, Any, Any]:
+        if (
+            self._deepseek_vl2_model is not None
+            and self._deepseek_vl2_processor is not None
+            and self._deepseek_vl2_tokenizer is not None
+        ):
+            return self._deepseek_vl2_model, self._deepseek_vl2_processor, self._deepseek_vl2_tokenizer
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM
+            from deepseek_vl2.models import DeepseekVLV2Processor
+        except Exception as exc:
+            raise RuntimeError("当前 Python 环境缺少 transformers 或 DeepSeek-VL2 依赖，无法加载 deepseek-vl2-tiny") from exc
+
+        model_path = self._deepseek_vl2_model_path()
+        processor = DeepseekVLV2Processor.from_pretrained(model_path)
+        model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
+        if torch.cuda.is_available() and self._device() is not None:
+            device = f"cuda:{self._device()}" if self._device().isdigit() else self._device()
+            model = model.to(torch.bfloat16).to(device)
+        else:
+            model = model.to(torch.float32)
+        model = model.eval()
+        self._deepseek_vl2_processor = processor
+        self._deepseek_vl2_tokenizer = processor.tokenizer
+        self._deepseek_vl2_model = model
+        return self._deepseek_vl2_model, self._deepseek_vl2_processor, self._deepseek_vl2_tokenizer
+
+    def _deepseek_vl2_model_path(self) -> str:
+        configured = Path(self.settings.deepseek_vl2_model_path)
+        if configured.exists():
+            return str(configured)
+        return "deepseek-ai/deepseek-vl2-tiny"
+
     def _resolve_model(self, feature: VisionFeature, model_name: str | None) -> str:
         if model_name and model_name in MODEL_ALIASES:
             return MODEL_ALIASES[model_name]
@@ -212,4 +331,3 @@ class VisionService:
 
     def _device(self) -> str | None:
         return self.settings.device or None
-

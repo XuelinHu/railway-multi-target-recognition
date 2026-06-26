@@ -2,3 +2,12 @@
 # to run real YOLO inference instead of the default mock backend.
 ultralytics>=8.3.0
 opencv-python-headless>=4.10.0
+transformers==4.38.2
+accelerate>=0.34.0
+huggingface-hub>=0.26.0
+socksio>=1.0.0
+sentencepiece>=0.2.0
+attrdict>=2.0.1
+einops>=0.8.0
+timm>=1.0.0
+xformers>=0.0.35

@@ -8,6 +8,7 @@ node_modules/
 dist/
 data/
 backend/data/
+backend/models/
 frontend/dist/
 logs/
 .env
