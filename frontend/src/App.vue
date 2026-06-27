@@ -115,6 +115,7 @@ const selectedModelByTask = reactive<Record<ImageTaskType, string>>({
 const imageHistoryList = ref<ImageAsset[]>([]);
 const labels = ref<LabelConfig[]>([]);
 const loading = ref(false);
+const processingOverlayText = ref("");
 const message = ref("");
 const historyCollapsed = ref(false);
 const thumbnailCollapsed = ref(false);
@@ -232,13 +233,16 @@ async function runCurrentTask() {
     message.value = "请先上传或选择图片";
     return;
   }
+  const taskTitle = currentConfig.value.title;
+  const modelName = selectedModelByTask[currentTaskType.value];
   await runBusy(async () => {
+    processingOverlayText.value = `${taskTitle}正在处理中，请稍候`;
     currentState.value.status = "processing";
     const result = await inferImageTask({
       imageId: currentState.value.currentImageId,
       taskType: currentTaskType.value,
       sessionId,
-      modelName: selectedModelByTask[currentTaskType.value],
+      modelName,
     });
     applyTaskResult(result);
     await loadCurrentVersions();
@@ -787,6 +791,7 @@ async function runBusy(action: () => Promise<void>, fallback: string) {
     message.value = error instanceof Error ? error.message : fallback;
   } finally {
     loading.value = false;
+    processingOverlayText.value = "";
   }
 }
 
@@ -1027,6 +1032,14 @@ function statusText(status: ImageTaskStatus) {
               <circle v-for="(point, index) in polygonDraft" :key="index" class="draft-point" :cx="point.x" :cy="point.y" r="6" />
               <circle v-for="point in resultKeypoints()" :key="point.name" class="keypoint" :cx="point.x" :cy="point.y" r="7" />
             </svg>
+          </div>
+
+          <div v-if="processingOverlayText" class="processing-mask" role="status" aria-live="polite">
+            <div class="processing-card">
+              <Loader2 class="processing-spinner" :size="44" />
+              <strong>{{ processingOverlayText }}</strong>
+              <span>{{ selectedModelByTask[currentTaskType] }} · 请勿关闭页面</span>
+            </div>
           </div>
         </div>
 
