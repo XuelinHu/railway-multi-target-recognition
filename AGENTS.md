@@ -40,3 +40,38 @@ rtk pip list            rtk pnpm install        rtk npm run <script>
 - For debugging, use raw command without rtk prefix
 - `rtk proxy <cmd>` runs command without filtering but tracks usage
 <!-- /headroom:rtk-instructions -->
+
+<!-- codex-agent-runtime:start -->
+
+## Runtime Ports And Database Configuration
+
+- Keep this section aligned with the root README when database names, ports, or service defaults change.
+- Do not copy secrets from local `.env` files into commits; document only placeholders or compose defaults.
+
+### Database
+- Primary database: PostgreSQL.
+- Default database name: `railway_recognition`.
+- Default database port: `5432`.
+- Default application URL: `postgresql+psycopg://deipss:<PASSWORD>@127.0.0.1:5432/railway_recognition`.
+- PostgreSQL stores assets, tasks, labels, annotation versions, and queue state. Tests may override `DATABASE_URL` with temporary SQLite URLs.
+
+### Default Ports
+- Backend API: `8010` on the host in local docs; Compose maps host `8010` to container `8000`.
+- Frontend Vite dev server: `4004`.
+- PostgreSQL: `5432`.
+
+### Notes For Codex Agents
+- Redis is not required; PostgreSQL task rows are used for queue claiming.
+- Before committing, check `git status --short --branch` and avoid staging unrelated runtime artifacts.
+
+### Source Files Checked
+- `backend/.env.example`
+- `backend/app/core/config.py`
+- `docker-compose.yml`
+- `frontend/vite.config.ts`
+
+<!-- codex-agent-runtime:end -->
+
+## GitHub Commit Language
+
+- Use English for all GitHub commit messages and pull/push related commit notes.
