@@ -350,3 +350,30 @@ uv run pytest
 - 增加数据集版本管理和训练集导出目录。
 - 增加任务失败重试、超时回收和 worker 监控。
 - 增加 TensorRT 性能基准测试。
+
+<!-- codex-runtime-notes:start -->
+
+## Runtime Ports And Database Configuration
+
+### Database
+- Primary database: PostgreSQL.
+- Default database name: `railway_recognition`.
+- Default database port: `5432`.
+- Default application URL: `postgresql+psycopg://deipss:<PASSWORD>@127.0.0.1:5432/railway_recognition`.
+- PostgreSQL stores assets, tasks, labels, annotation versions, and queue state. Tests may override `DATABASE_URL` with temporary SQLite URLs.
+
+### Default Ports
+- Backend API: `8010` on the host in local docs; Compose maps host `8010` to container `8000`.
+- Frontend Vite dev server: `4004`.
+- PostgreSQL: `5432`.
+
+### Notes
+- Redis is not required; PostgreSQL task rows are used for queue claiming.
+
+### Source Files Checked
+- `backend/.env.example`
+- `backend/app/core/config.py`
+- `docker-compose.yml`
+- `frontend/vite.config.ts`
+
+<!-- codex-runtime-notes:end -->
