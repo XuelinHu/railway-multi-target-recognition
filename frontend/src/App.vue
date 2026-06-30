@@ -55,6 +55,7 @@ import {
 type PageMode = "workspace" | "settings";
 type AnnotationTool = "select" | "pan" | "box" | "polygon" | "line";
 type ShapeType = "box" | "polygon" | "line";
+type ResizeSide = "history" | "thumbnail";
 
 type TaskConfig = {
   type: ImageTaskType;
@@ -120,6 +121,12 @@ const processingOverlayText = ref("");
 const message = ref("");
 const historyCollapsed = ref(false);
 const thumbnailCollapsed = ref(false);
+const workspaceBodyRef = ref<HTMLElement | null>(null);
+const panelLayout = reactive({
+  historyWidth: 280,
+  thumbnailWidth: 300,
+  resizing: null as ResizeSide | null,
+});
 const originalPreview = ref<ImageAsset | null>(null);
 const activeTool = ref<AnnotationTool>("select");
 const selectedShapeId = ref<string | null>(null);
@@ -147,6 +154,11 @@ const taskStates = reactive<Record<ImageTaskType, TaskState>>({
 const currentState = computed(() => taskStates[currentTaskType.value]);
 const currentConfig = computed(() => taskConfigs.find((item) => item.type === currentTaskType.value) ?? taskConfigs[0]);
 const currentImageUrl = computed(() => assetUrl(currentState.value.imageUrl));
+const workspaceGridStyle = computed(() => ({
+  gridTemplateColumns: `${historyCollapsed.value ? 48 : panelLayout.historyWidth}px 6px minmax(360px, 1fr) 6px ${
+    thumbnailCollapsed.value ? 48 : panelLayout.thumbnailWidth
+  }px`,
+}));
 const view = reactive({ zoom: 1, x: 0, y: 0, dragging: false, startX: 0, startY: 0, originX: 0, originY: 0 });
 
 const annotationShapes = computed(() => readShapes(currentState.value.annotationJson));
@@ -181,6 +193,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleGlobalKeydown);
+  stopPanelResize();
 });
 
 async function setTaskType(taskType: ImageTaskType) {
@@ -482,6 +495,35 @@ function onStagePointerMove(event: PointerEvent) {
 
 function stopStageDrag() {
   view.dragging = false;
+}
+
+function startPanelResize(event: PointerEvent, side: ResizeSide) {
+  if ((side === "history" && historyCollapsed.value) || (side === "thumbnail" && thumbnailCollapsed.value)) return;
+  event.preventDefault();
+  panelLayout.resizing = side;
+  window.addEventListener("pointermove", onPanelResize);
+  window.addEventListener("pointerup", stopPanelResize);
+}
+
+function onPanelResize(event: PointerEvent) {
+  const workspace = workspaceBodyRef.value;
+  if (!workspace || !panelLayout.resizing) return;
+  const rect = workspace.getBoundingClientRect();
+  if (panelLayout.resizing === "history") {
+    panelLayout.historyWidth = clampPanelWidth(event.clientX - rect.left - 12);
+    return;
+  }
+  panelLayout.thumbnailWidth = clampPanelWidth(rect.right - event.clientX - 12);
+}
+
+function stopPanelResize() {
+  panelLayout.resizing = null;
+  window.removeEventListener("pointermove", onPanelResize);
+  window.removeEventListener("pointerup", stopPanelResize);
+}
+
+function clampPanelWidth(value: number) {
+  return Math.min(520, Math.max(180, Math.round(value)));
 }
 
 function onOverlayPointerDown(event: PointerEvent) {
@@ -911,7 +953,13 @@ function statusText(status: ImageTaskStatus) {
       </button>
     </nav>
 
-    <section v-if="currentPage === 'workspace'" class="workspace-body">
+    <section
+      v-if="currentPage === 'workspace'"
+      ref="workspaceBodyRef"
+      class="workspace-body"
+      :class="{ 'is-resizing': panelLayout.resizing }"
+      :style="workspaceGridStyle"
+    >
       <aside class="history-panel" :class="{ collapsed: historyCollapsed }">
         <div class="panel-head">
           <strong v-if="!historyCollapsed">历史图片</strong>
@@ -946,6 +994,14 @@ function statusText(status: ImageTaskStatus) {
           </div>
         </template>
       </aside>
+
+      <button
+        class="panel-resizer history-resizer"
+        :disabled="historyCollapsed"
+        title="拖动调整历史图片宽度"
+        aria-label="拖动调整历史图片宽度"
+        @pointerdown="startPanelResize($event, 'history')"
+      ></button>
 
       <section class="editor-panel">
         <div class="editor-toolbar">
@@ -1074,6 +1130,14 @@ function statusText(status: ImageTaskStatus) {
         </div>
       </section>
 
+      <button
+        class="panel-resizer thumbnail-resizer"
+        :disabled="thumbnailCollapsed"
+        title="拖动调整标签与属性宽度"
+        aria-label="拖动调整标签与属性宽度"
+        @pointerdown="startPanelResize($event, 'thumbnail')"
+      ></button>
+
       <aside class="thumbnail-panel" :class="{ collapsed: thumbnailCollapsed }">
         <div class="panel-head">
           <strong v-if="!thumbnailCollapsed">标签与属性</strong>
@@ -1141,10 +1205,10 @@ function statusText(status: ImageTaskStatus) {
             <template v-else-if="currentTaskType === 'caption'">
               <div class="caption-actions">
                 <button :disabled="!currentState.descriptionText" @click="playCaption('zh-CN')">
-                  <Volume2 :size="15" />播放中文
+                  <Volume2 :size="15" />播放中文简体
                 </button>
                 <button :disabled="!currentState.descriptionText" @click="playCaption('en-US')">
-                  <Volume2 :size="15" />播放英语
+                  <Volume2 :size="15" />播放英文
                 </button>
               </div>
               <p class="caption-text">{{ currentState.descriptionText || "暂无描述" }}</p>

@@ -152,10 +152,14 @@ button.active {
 .workspace-body {
   flex: 1;
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) 300px;
-  gap: 12px;
+  grid-template-columns: 280px 6px minmax(360px, 1fr) 6px 300px;
+  gap: 8px;
   min-height: 0;
   padding: 12px;
+}
+
+.workspace-body.is-resizing {
+  user-select: none;
 }
 
 .history-panel,
@@ -179,16 +183,36 @@ button.active {
   width: 48px;
 }
 
-.workspace-body:has(.history-panel.collapsed) {
-  grid-template-columns: 48px minmax(0, 1fr) 300px;
+.panel-resizer {
+  align-self: stretch;
+  min-width: 6px;
+  width: 6px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: col-resize;
 }
 
-.workspace-body:has(.thumbnail-panel.collapsed) {
-  grid-template-columns: 260px minmax(0, 1fr) 48px;
+.panel-resizer::before {
+  content: "";
+  display: block;
+  width: 2px;
+  height: 100%;
+  margin: 0 auto;
+  border-radius: 2px;
+  background: #d7dee6;
 }
 
-.workspace-body:has(.history-panel.collapsed):has(.thumbnail-panel.collapsed) {
-  grid-template-columns: 48px minmax(0, 1fr) 48px;
+.panel-resizer:hover::before,
+.workspace-body.is-resizing .panel-resizer::before {
+  background: #286eac;
+}
+
+.panel-resizer:disabled {
+  cursor: default;
+  opacity: 0.35;
 }
 
 .panel-head {
@@ -652,12 +676,13 @@ button.active {
 
 .caption-actions {
   margin-bottom: 8px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
 .caption-actions button {
+  flex: 1 1 116px;
   min-width: 0;
   min-height: 32px;
   padding: 0 8px;
@@ -865,13 +890,15 @@ button.active {
   }
 
   .workspace-body,
-  .workspace-body:has(.history-panel.collapsed),
-  .workspace-body:has(.thumbnail-panel.collapsed),
-  .workspace-body:has(.history-panel.collapsed):has(.thumbnail-panel.collapsed) {
+  .workspace-body[style] {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(220px, auto) minmax(520px, 1fr) minmax(240px, auto);
     min-height: calc(100vh - 121px);
     overflow-y: auto;
+  }
+
+  .panel-resizer {
+    display: none;
   }
 
   .history-panel,
