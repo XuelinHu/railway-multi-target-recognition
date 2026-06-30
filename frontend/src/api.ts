@@ -87,7 +87,18 @@ export type ApiEnvelope<T> = {
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8010";
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, options);
+  const url = `${API_BASE_URL}${path}`;
+  let response: Response;
+  try {
+    response = await fetch(url, options);
+  } catch (error) {
+    console.error("[API] Network error", {
+      url,
+      method: options?.method ?? "GET",
+      error,
+    });
+    throw new Error("网络异常，请检查后端服务或网络连接");
+  }
   if (!response.ok) {
     let detail = response.statusText;
     try {
@@ -97,6 +108,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     } catch {
       detail = await response.text();
     }
+    console.error("[API] Request failed", {
+      url,
+      method: options?.method ?? "GET",
+      status: response.status,
+      detail,
+    });
     throw new Error(detail || `HTTP ${response.status}`);
   }
   return response.json() as Promise<T>;

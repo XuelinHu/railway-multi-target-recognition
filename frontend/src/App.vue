@@ -23,6 +23,7 @@ import {
   Tags,
   Trash2,
   Upload,
+  Volume2,
   Waypoints,
   ZoomIn,
 } from "@lucide/vue";
@@ -795,6 +796,28 @@ async function runBusy(action: () => Promise<void>, fallback: string) {
   }
 }
 
+function playCaption(lang: "zh-CN" | "en-US") {
+  const text = currentState.value.descriptionText?.trim();
+  if (!text) {
+    message.value = "暂无可播放的图像描述";
+    return;
+  }
+  if (!("speechSynthesis" in window)) {
+    message.value = "当前浏览器不支持语音播放";
+    console.error("[Speech] speechSynthesis is not supported");
+    return;
+  }
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = lang;
+  utterance.rate = 0.95;
+  utterance.onerror = (event) => {
+    console.error("[Speech] Caption playback failed", event);
+    message.value = "语音播放失败";
+  };
+  window.speechSynthesis.speak(utterance);
+}
+
 function validateImage(file: File): string {
   const allowed = ["image/jpeg", "image/png", "image/webp", "image/bmp"];
   const extAllowed = /\.(jpe?g|png|webp|bmp)$/i.test(file.name);
@@ -1115,7 +1138,17 @@ function statusText(status: ImageTaskStatus) {
                 <strong>{{ item.label }}</strong><span>{{ Math.round(item.score * 100) }}%</span>
               </div>
             </template>
-            <p v-else-if="currentTaskType === 'caption'" class="caption-text">{{ currentState.descriptionText || "暂无描述" }}</p>
+            <template v-else-if="currentTaskType === 'caption'">
+              <div class="caption-actions">
+                <button :disabled="!currentState.descriptionText" @click="playCaption('zh-CN')">
+                  <Volume2 :size="15" />播放中文
+                </button>
+                <button :disabled="!currentState.descriptionText" @click="playCaption('en-US')">
+                  <Volume2 :size="15" />播放英语
+                </button>
+              </div>
+              <p class="caption-text">{{ currentState.descriptionText || "暂无描述" }}</p>
+            </template>
             <div v-else class="result-row"><strong>标注对象</strong><span>{{ annotationShapes.length }} 个</span></div>
           </section>
 
