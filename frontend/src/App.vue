@@ -159,6 +159,7 @@ const workspaceGridStyle = computed(() => ({
     thumbnailCollapsed.value ? 48 : panelLayout.thumbnailWidth
   }px`,
 }));
+const captionIsTransferring = computed(() => currentTaskType.value === "caption" && (loading.value || currentState.value.status === "processing"));
 const view = reactive({ zoom: 1, x: 0, y: 0, dragging: false, startX: 0, startY: 0, originX: 0, originY: 0 });
 
 const annotationShapes = computed(() => readShapes(currentState.value.annotationJson));
@@ -838,7 +839,7 @@ async function runBusy(action: () => Promise<void>, fallback: string) {
   }
 }
 
-function playCaption(lang: "zh-CN" | "en-US") {
+function playCaption() {
   const text = currentState.value.descriptionText?.trim();
   if (!text) {
     message.value = "暂无可播放的图像描述";
@@ -851,7 +852,7 @@ function playCaption(lang: "zh-CN" | "en-US") {
   }
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = lang;
+  utterance.lang = "zh-CN";
   utterance.rate = 0.95;
   utterance.onerror = (event) => {
     console.error("[Speech] Caption playback failed", event);
@@ -1204,11 +1205,10 @@ function statusText(status: ImageTaskStatus) {
             </template>
             <template v-else-if="currentTaskType === 'caption'">
               <div class="caption-actions">
-                <button :disabled="!currentState.descriptionText" @click="playCaption('zh-CN')">
-                  <Volume2 :size="15" />播放中文简体
-                </button>
-                <button :disabled="!currentState.descriptionText" @click="playCaption('en-US')">
-                  <Volume2 :size="15" />播放英文
+                <button :disabled="captionIsTransferring || !currentState.descriptionText" @click="playCaption">
+                  <Loader2 v-if="captionIsTransferring" class="spin" :size="15" />
+                  <Volume2 v-else :size="15" />
+                  {{ captionIsTransferring ? "处理中" : "播放中文简体" }}
                 </button>
               </div>
               <p class="caption-text">{{ currentState.descriptionText || "暂无描述" }}</p>
