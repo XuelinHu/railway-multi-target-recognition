@@ -529,6 +529,14 @@ button.active {
   vector-effect: non-scaling-stroke;
 }
 
+.pose-bone {
+  stroke: #0ea5e9;
+  stroke-width: 5;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
 .keypoint {
   fill: #f59e0b;
   stroke: #ffffff;

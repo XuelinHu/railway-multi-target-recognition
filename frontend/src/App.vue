@@ -81,6 +81,15 @@ type TaskState = {
 };
 
 type Point = { x: number; y: number };
+type PoseKeypoint = Point & { name: string; score: number };
+type PoseSkeletonLine = {
+  name: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  score: number;
+};
 type AnnotationShape = {
   id: string;
   type: ShapeType;
@@ -102,6 +111,25 @@ const taskConfigs: TaskConfig[] = [
     description: "生成图片描述文本",
     models: ["deepseek-vl2-tiny", "blip-image-captioning-base", "yolo-cls-fallback"],
   },
+];
+
+const poseSkeletonPairs = [
+  ["left_shoulder", "right_shoulder"],
+  ["left_shoulder", "left_elbow"],
+  ["left_elbow", "left_wrist"],
+  ["right_shoulder", "right_elbow"],
+  ["right_elbow", "right_wrist"],
+  ["left_shoulder", "left_hip"],
+  ["right_shoulder", "right_hip"],
+  ["left_hip", "right_hip"],
+  ["left_hip", "left_knee"],
+  ["left_knee", "left_ankle"],
+  ["right_hip", "right_knee"],
+  ["right_knee", "right_ankle"],
+  ["nose", "left_eye"],
+  ["nose", "right_eye"],
+  ["left_eye", "left_ear"],
+  ["right_eye", "right_ear"],
 ];
 
 const currentPage = ref<PageMode>("workspace");
@@ -787,13 +815,59 @@ function shapeTypeText(type: ShapeType) {
   return { box: "矩形框", polygon: "多边形", line: "线段" }[type];
 }
 
-function resultKeypoints() {
-  return ((currentState.value.resultJson?.keypoints as Array<Record<string, number | string>> | undefined) ?? []) as Array<{
-    name: string;
-    x: number;
-    y: number;
-    score: number;
-  }>;
+function resultKeypoints(): PoseKeypoint[] {
+  const keypoints = (currentState.value.resultJson?.keypoints as Array<Record<string, number | string>> | undefined) ?? [];
+  return keypoints.map((point) => ({
+    name: String(point.name),
+    x: Number(point.x),
+    y: Number(point.y),
+    score: Number(point.score ?? 1),
+  }));
+}
+
+function resultSkeleton(): PoseSkeletonLine[] {
+  const skeleton = (currentState.value.resultJson?.skeleton as Array<Record<string, number | string>> | undefined) ?? [];
+  if (skeleton.length > 0) {
+    return skeleton.map((line, index) => ({
+      name: String(line.name ?? `skeleton_${index}`),
+      x1: Number(line.x1),
+      y1: Number(line.y1),
+      x2: Number(line.x2),
+      y2: Number(line.y2),
+      score: Number(line.score ?? 1),
+    }));
+  }
+  return fallbackSkeletonFromKeypoints(resultKeypoints());
+}
+
+function fallbackSkeletonFromKeypoints(keypoints: PoseKeypoint[]): PoseSkeletonLine[] {
+  const grouped = new Map<string, Map<string, PoseKeypoint>>();
+  for (const point of keypoints) {
+    const match = point.name.match(/^person_(\d+)_(.+)$/);
+    if (!match || point.score <= 0.05 || (point.x <= 0 && point.y <= 0)) continue;
+    const [, personIndex, keypointName] = match;
+    const group = grouped.get(personIndex) ?? new Map<string, PoseKeypoint>();
+    group.set(keypointName, point);
+    grouped.set(personIndex, group);
+  }
+
+  const lines: PoseSkeletonLine[] = [];
+  for (const [personIndex, points] of grouped) {
+    for (const [fromName, toName] of poseSkeletonPairs) {
+      const from = points.get(fromName);
+      const to = points.get(toName);
+      if (!from || !to) continue;
+      lines.push({
+        name: `person_${personIndex}_${fromName}_to_${toName}`,
+        x1: from.x,
+        y1: from.y,
+        x2: to.x,
+        y2: to.y,
+        score: Math.min(from.score, to.score),
+      });
+    }
+  }
+  return lines;
 }
 
 function resultLabels() {
@@ -1110,6 +1184,7 @@ function statusText(status: ImageTaskStatus) {
               <line v-if="draftShape?.type === 'line'" class="draft-shape" v-bind="linePoints(draftShape.points)" />
               <polyline v-if="polygonDraft.length > 0" class="draft-shape" :points="polygonPoints(polygonDraft)" />
               <circle v-for="(point, index) in polygonDraft" :key="index" class="draft-point" :cx="point.x" :cy="point.y" r="6" />
+              <line v-for="line in resultSkeleton()" :key="line.name" class="pose-bone" :x1="line.x1" :y1="line.y1" :x2="line.x2" :y2="line.y2" />
               <circle v-for="point in resultKeypoints()" :key="point.name" class="keypoint" :cx="point.x" :cy="point.y" r="7" />
             </svg>
           </div>
