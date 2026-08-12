@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
   Boxes,
+  Camera,
   Check,
   ChevronLeft,
   ChevronRight,
   Copy,
   Download,
   Edit3,
+  Film,
   Image as ImageIcon,
+  LogOut,
   Loader2,
   Maximize2,
   MousePointer2,
@@ -18,22 +21,31 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Search,
   Settings,
   Sparkles,
   Tags,
   Trash2,
   Upload,
+  UserRound,
   Volume2,
   Waypoints,
   ZoomIn,
 } from "@lucide/vue";
+import LiveGesturePage from "./components/LiveGesturePage.vue";
 import {
+  ApiRequestError,
+  type AuthUser,
   type ImageAsset,
+  type ImageReviewStatus,
   type ImageTaskResult,
   type ImageTaskResultVersion,
   type ImageTaskStatus,
   type ImageTaskType,
   type LabelConfig,
+  type VideoCaptionBatch,
+  type VideoCaptionFrame,
+  type VideoCaptionVideo,
   assetUrl,
   createImageTask,
   createLabel,
@@ -42,20 +54,32 @@ import {
   getTaskResult,
   getTaskResultVersion,
   inferImageTask,
+  getCurrentUser,
   listImages,
   listLabels,
+  listUsers,
   listTaskResultVersions,
+  listVideoCaptionBatches,
+  listVideoCaptionFrames,
+  listVideoCaptionVideos,
+  login,
+  logout,
+  register,
   restoreTaskResultVersion,
+  reviewTaskResult,
   saveTaskResult,
+  submitTaskResult,
   updateAnnotation,
   updateLabel,
+  updateUserRole,
   uploadImage,
 } from "./api";
 
-type PageMode = "workspace" | "settings";
+type PageMode = "workspace" | "videoCaptions" | "liveGesture" | "settings";
 type AnnotationTool = "select" | "pan" | "box" | "polygon" | "line";
 type ShapeType = "box" | "polygon" | "line";
 type ResizeSide = "history" | "thumbnail";
+type AuthMode = "login" | "register";
 
 type TaskConfig = {
   type: ImageTaskType;
@@ -78,6 +102,10 @@ type TaskState = {
   activeVersionId: string | null;
   latestVersionNo: number | null;
   isViewingHistory: boolean;
+  reviewStatus: ImageReviewStatus;
+  reviewComment: string;
+  submittedAt: string | null;
+  reviewedAt: string | null;
 };
 
 type Point = { x: number; y: number };
@@ -144,9 +172,11 @@ const selectedModelByTask = reactive<Record<ImageTaskType, string>>({
 
 const imageHistoryList = ref<ImageAsset[]>([]);
 const labels = ref<LabelConfig[]>([]);
-const loading = ref(false);
+const activeRequestCount = ref(0);
+const loading = computed(() => activeRequestCount.value > 0);
 const processingOverlayText = ref("");
 const message = ref("");
+const errorDialog = ref("");
 const historyCollapsed = ref(false);
 const thumbnailCollapsed = ref(false);
 const workspaceBodyRef = ref<HTMLElement | null>(null);
@@ -158,6 +188,7 @@ const panelLayout = reactive({
 const originalPreview = ref<ImageAsset | null>(null);
 const activeTool = ref<AnnotationTool>("select");
 const selectedShapeId = ref<string | null>(null);
+const activePresetLabelId = ref<number | null>(null);
 const draftShape = ref<AnnotationShape | null>(null);
 const polygonDraft = ref<Point[]>([]);
 const drawing = reactive({ active: false, mode: "" as "" | "draw" | "move" | "resize", shapeId: "", start: null as Point | null });
@@ -169,8 +200,22 @@ const labelForm = reactive({
 });
 const editingLabelId = ref<number | null>(null);
 const editingLabel = reactive({ englishName: "", chineseName: "", description: "" });
+const currentUser = ref<AuthUser | null>(null);
+const authReady = ref(false);
+const authMode = ref<AuthMode>("login");
+const authForm = reactive({ username: "", displayName: "", password: "" });
+const users = ref<AuthUser[]>([]);
+const reviewCommentInput = ref("");
+const videoCaptionBatches = ref<VideoCaptionBatch[]>([]);
+const videoCaptionVideos = ref<VideoCaptionVideo[]>([]);
+const videoCaptionFrames = ref<VideoCaptionFrame[]>([]);
+const selectedVideoCaptionBatchId = ref("");
+const selectedVideoCaptionVideoId = ref("");
+const selectedVideoCaptionFrameId = ref("");
+const videoCaptionQuery = ref("");
+const videoCaptionTotal = ref(0);
 
-const sessionId = getSessionId();
+const defaultSessionId = "default";
 const taskStates = reactive<Record<ImageTaskType, TaskState>>({
   detection: createDefaultTaskState(),
   segmentation: createDefaultTaskState(),
@@ -192,6 +237,13 @@ const view = reactive({ zoom: 1, x: 0, y: 0, dragging: false, startX: 0, startY:
 
 const annotationShapes = computed(() => readShapes(currentState.value.annotationJson));
 const selectedShape = computed(() => annotationShapes.value.find((shape) => shape.id === selectedShapeId.value) ?? null);
+const activePresetLabel = computed(() => labels.value.find((label) => label.labelId === activePresetLabelId.value) ?? labels.value[0] ?? null);
+const presetLabels = computed(() =>
+  labels.value.map((label, index) => ({
+    label,
+    shortcut: labelShortcut(index),
+  })),
+);
 const selectedLabelId = computed({
   get: () => selectedShape.value?.labelId ?? "",
   set: (value: string | number) => {
@@ -205,25 +257,80 @@ const selectedLabelId = computed({
       return;
     }
     const label = labels.value.find((item) => item.labelId === Number(value));
-    updateShape(selectedShape.value.id, {
-      labelId: label?.labelId ?? null,
-      label: label ? `${label.englishName} / ${label.chineseName}` : selectedShape.value.label,
-      source: "edited",
-    });
+    if (label) selectPresetLabel(label);
   },
+});
+const selectedVideoCaptionBatch = computed(
+  () => videoCaptionBatches.value.find((batch) => batch.batchId === selectedVideoCaptionBatchId.value) ?? null,
+);
+const selectedVideoCaptionVideo = computed(
+  () => videoCaptionVideos.value.find((video) => video.videoId === selectedVideoCaptionVideoId.value) ?? null,
+);
+const selectedVideoCaptionFrame = computed(
+  () => videoCaptionFrames.value.find((frame) => frame.frameId === selectedVideoCaptionFrameId.value) ?? null,
+);
+const canReview = computed(() => currentUser.value?.role === "reviewer" || currentUser.value?.role === "admin");
+const isAdmin = computed(() => currentUser.value?.role === "admin");
+const resultLocked = computed(() => currentState.value.reviewStatus === "approved");
+const editingDisabled = computed(() => resultLocked.value || currentUser.value?.role === "reviewer");
+
+watch(selectedShape, (shape) => {
+  if (shape?.labelId !== null && shape?.labelId !== undefined && labels.value.some((label) => label.labelId === shape.labelId)) {
+    activePresetLabelId.value = shape.labelId;
+  }
 });
 
 onMounted(async () => {
   window.addEventListener("keydown", handleGlobalKeydown);
-  await Promise.all([loadLabels(), loadImageHistory()]);
-  const first = imageHistoryList.value[0];
-  if (first) await selectImage(first);
+  await restoreLoginState();
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleGlobalKeydown);
   stopPanelResize();
 });
+
+async function restoreLoginState() {
+  await runBusy(async () => {
+    currentUser.value = await getCurrentUser();
+    if (currentUser.value) await initializeAuthenticatedWorkspace();
+  }, "登录状态检查失败");
+  authReady.value = true;
+}
+
+async function initializeAuthenticatedWorkspace() {
+  await Promise.all([loadLabels(), loadImageHistory()]);
+  const first = imageHistoryList.value[0];
+  if (first) await selectImage(first);
+}
+
+async function submitAuth() {
+  await runBusy(async () => {
+    currentUser.value =
+      authMode.value === "login"
+        ? await login({ username: authForm.username.trim(), password: authForm.password })
+        : await register({
+            username: authForm.username.trim(),
+            displayName: authForm.displayName.trim(),
+            password: authForm.password,
+          });
+    authForm.password = "";
+    await initializeAuthenticatedWorkspace();
+    message.value = `欢迎，${currentUser.value.displayName}`;
+  }, authMode.value === "login" ? "登录失败" : "注册失败");
+}
+
+async function signOut() {
+  await runBusy(async () => {
+    await logout();
+    currentUser.value = null;
+    imageHistoryList.value = [];
+    labels.value = [];
+    for (const state of Object.values(taskStates)) Object.assign(state, createDefaultTaskState());
+    authForm.password = "";
+    message.value = "已退出登录";
+  }, "退出登录失败");
+}
 
 async function setTaskType(taskType: ImageTaskType) {
   currentTaskType.value = taskType;
@@ -235,6 +342,15 @@ async function setTaskType(taskType: ImageTaskType) {
   if (!state.currentImageId && imageHistoryList.value[0]) await selectImage(imageHistoryList.value[0]);
 }
 
+async function setPage(page: PageMode) {
+  currentPage.value = page;
+  message.value = "";
+  if (page === "videoCaptions" && videoCaptionBatches.value.length === 0) {
+    await loadVideoCaptionBatches();
+  }
+  if (page === "settings" && isAdmin.value) await loadUsers();
+}
+
 async function handleUpload(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
@@ -243,10 +359,11 @@ async function handleUpload(event: Event) {
   const error = validateImage(file);
   if (error) {
     message.value = error;
+    errorDialog.value = error;
     return;
   }
   await runBusy(async () => {
-    const image = await uploadImage(file, currentTaskType.value, sessionId);
+    const image = await uploadImage(file, currentTaskType.value, defaultSessionId);
     await bindImageToCurrentTask(image);
     await loadImageHistory();
     message.value = "上传完成，原图已保存";
@@ -255,15 +372,27 @@ async function handleUpload(event: Event) {
 
 async function loadImageHistory() {
   await runBusy(async () => {
-    const data = await listImages({ taskType: currentTaskType.value, page: 1, pageSize: 80, sessionId });
-    imageHistoryList.value = data.records;
+    const records: ImageAsset[] = [];
+    let page = 1;
+    let total = 0;
+    do {
+      const data = await listImages({ taskType: currentTaskType.value, page, pageSize: 200 });
+      records.push(...data.records);
+      total = data.total;
+      page += 1;
+    } while (records.length < total);
+    imageHistoryList.value = records;
   }, "历史图片加载失败");
 }
 
 async function selectImage(image: ImageAsset) {
   await runBusy(async () => {
     await bindImageToCurrentTask(image);
-    const result = await getTaskResult({ imageId: image.imageId, taskType: currentTaskType.value, sessionId });
+    const result = await getTaskResult({
+      imageId: image.imageId,
+      taskType: currentTaskType.value,
+      sessionId: image.sessionId || defaultSessionId,
+    });
     applyTaskResult(result);
     await loadCurrentVersions();
     message.value = result ? "任务结果已加载" : "当前图片暂无该任务结果";
@@ -284,7 +413,7 @@ async function runCurrentTask() {
     const result = await inferImageTask({
       imageId: currentState.value.currentImageId,
       taskType: currentTaskType.value,
-      sessionId,
+      sessionId: currentImageSessionId(),
       modelName,
     });
     applyTaskResult(result);
@@ -303,7 +432,11 @@ async function saveCurrentResult() {
   await runBusy(async () => {
     const task = state.taskId
       ? { taskId: state.taskId }
-      : await createImageTask({ imageId: state.currentImageId!, taskType: currentTaskType.value, sessionId });
+      : await createImageTask({
+          imageId: state.currentImageId!,
+          taskType: currentTaskType.value,
+          sessionId: currentImageSessionId(),
+        });
     state.taskId = task.taskId;
     ensureAnnotationJson();
     await saveTaskResult({
@@ -319,6 +452,9 @@ async function saveCurrentResult() {
     });
     await loadCurrentVersions();
     await loadImageHistory();
+    state.reviewStatus = "draft";
+    state.reviewComment = "";
+    state.reviewedAt = null;
     message.value = "当前任务结果已保存";
   }, "保存当前结果失败");
 }
@@ -331,7 +467,11 @@ async function saveAnnotationSnapshot() {
   }
   await runBusy(async () => {
     if (!state.taskId) {
-      const task = await createImageTask({ imageId: state.currentImageId!, taskType: currentTaskType.value, sessionId });
+      const task = await createImageTask({
+        imageId: state.currentImageId!,
+        taskType: currentTaskType.value,
+        sessionId: currentImageSessionId(),
+      });
       state.taskId = task.taskId;
     }
     ensureAnnotationJson();
@@ -370,6 +510,10 @@ function applyTaskResult(result: ImageTaskResult | null) {
     state.activeVersionId = null;
     state.latestVersionNo = null;
     state.isViewingHistory = false;
+    state.reviewStatus = "draft";
+    state.reviewComment = "";
+    state.submittedAt = null;
+    state.reviewedAt = null;
     return;
   }
   state.taskId = result.taskId;
@@ -381,6 +525,11 @@ function applyTaskResult(result: ImageTaskResult | null) {
   state.activeVersionId = result.latestVersionId || null;
   state.latestVersionNo = result.latestVersionNo || null;
   state.isViewingHistory = false;
+  state.reviewStatus = result.reviewStatus || "draft";
+  state.reviewComment = result.reviewComment || "";
+  state.submittedAt = result.submittedAt || null;
+  state.reviewedAt = result.reviewedAt || null;
+  reviewCommentInput.value = result.reviewComment || "";
   selectedShapeId.value = null;
 }
 
@@ -390,7 +539,11 @@ async function loadCurrentVersions() {
     state.versions = [];
     return;
   }
-  state.versions = await listTaskResultVersions({ imageId: state.currentImageId, taskType: currentTaskType.value, sessionId });
+  state.versions = await listTaskResultVersions({
+    imageId: state.currentImageId,
+    taskType: currentTaskType.value,
+    sessionId: currentImageSessionId(),
+  });
   if (!state.activeVersionId && state.versions[0]) {
     state.activeVersionId = state.versions[0].versionId;
     state.latestVersionNo = state.versions[0].versionNo;
@@ -444,7 +597,113 @@ async function bindImageToCurrentTask(image: ImageAsset) {
 async function loadLabels() {
   await runBusy(async () => {
     labels.value = await listLabels();
+    if (!labels.value.some((label) => label.labelId === activePresetLabelId.value)) {
+      activePresetLabelId.value = labels.value[0]?.labelId ?? null;
+    }
   }, "标签加载失败");
+}
+
+async function loadUsers() {
+  if (!isAdmin.value) return;
+  await runBusy(async () => {
+    users.value = await listUsers();
+  }, "用户列表加载失败");
+}
+
+async function changeUserRole(userId: string, role: "student" | "reviewer" | "admin") {
+  await runBusy(async () => {
+    await updateUserRole(userId, role);
+    await loadUsers();
+    message.value = "用户角色已更新";
+  }, "用户角色更新失败");
+}
+
+function handleRoleChange(userId: string, event: Event) {
+  const role = (event.target as HTMLSelectElement).value;
+  if (role === "student" || role === "reviewer" || role === "admin") void changeUserRole(userId, role);
+}
+
+async function submitForReview() {
+  if (!currentState.value.taskId) return;
+  await runBusy(async () => {
+    applyTaskResult(await submitTaskResult(currentState.value.taskId!));
+    message.value = "已提交审核";
+  }, "提交审核失败");
+}
+
+async function reviewCurrentResult(status: "approved" | "rejected") {
+  if (!currentState.value.taskId) return;
+  await runBusy(async () => {
+    applyTaskResult(await reviewTaskResult(currentState.value.taskId!, status, reviewCommentInput.value));
+    message.value = status === "approved" ? "审核已通过，结果已锁定" : "已驳回并返回修改";
+  }, "审核操作失败");
+}
+
+async function loadVideoCaptionBatches() {
+  await runBusy(async () => {
+    videoCaptionBatches.value = await listVideoCaptionBatches();
+    if (!selectedVideoCaptionBatchId.value && videoCaptionBatches.value[0]) {
+      selectedVideoCaptionBatchId.value = videoCaptionBatches.value[0].batchId;
+    }
+    if (selectedVideoCaptionBatchId.value) await loadVideoCaptionVideos();
+    message.value = "视频解帧批次已加载";
+  }, "视频解帧批次加载失败");
+}
+
+async function loadVideoCaptionVideos() {
+  if (!selectedVideoCaptionBatchId.value) {
+    videoCaptionVideos.value = [];
+    videoCaptionFrames.value = [];
+    selectedVideoCaptionVideoId.value = "";
+    selectedVideoCaptionFrameId.value = "";
+    return;
+  }
+  videoCaptionVideos.value = await listVideoCaptionVideos(selectedVideoCaptionBatchId.value);
+  if (!videoCaptionVideos.value.some((video) => video.videoId === selectedVideoCaptionVideoId.value)) {
+    selectedVideoCaptionVideoId.value = videoCaptionVideos.value[0]?.videoId ?? "";
+  }
+  await loadVideoCaptionFrames();
+}
+
+async function selectVideoCaptionBatch(batchId: string) {
+  selectedVideoCaptionBatchId.value = batchId;
+  selectedVideoCaptionVideoId.value = "";
+  selectedVideoCaptionFrameId.value = "";
+  await runBusy(loadVideoCaptionVideos, "视频列表加载失败");
+}
+
+async function selectVideoCaptionVideo(videoId: string) {
+  selectedVideoCaptionVideoId.value = videoId;
+  selectedVideoCaptionFrameId.value = "";
+  await runBusy(loadVideoCaptionFrames, "视频帧加载失败");
+}
+
+async function loadVideoCaptionFrames() {
+  if (!selectedVideoCaptionVideoId.value) {
+    videoCaptionFrames.value = [];
+    selectedVideoCaptionFrameId.value = "";
+    videoCaptionTotal.value = 0;
+    return;
+  }
+  const data = await listVideoCaptionFrames({
+    videoId: selectedVideoCaptionVideoId.value,
+    page: 1,
+    pageSize: 500,
+    query: videoCaptionQuery.value.trim(),
+  });
+  videoCaptionFrames.value = data.records;
+  videoCaptionTotal.value = data.total;
+  if (!videoCaptionFrames.value.some((frame) => frame.frameId === selectedVideoCaptionFrameId.value)) {
+    selectedVideoCaptionFrameId.value = videoCaptionFrames.value[0]?.frameId ?? "";
+  }
+}
+
+async function searchVideoCaptionFrames() {
+  await runBusy(loadVideoCaptionFrames, "帧描述检索失败");
+}
+
+function selectVideoCaptionFrame(frameId: string) {
+  selectedVideoCaptionFrameId.value = frameId;
 }
 
 async function submitLabel() {
@@ -500,6 +759,10 @@ async function removeLabel(labelId: number) {
 }
 
 function setTool(tool: AnnotationTool) {
+  if (editingDisabled.value && ["box", "polygon", "line"].includes(tool)) {
+    message.value = resultLocked.value ? "审核通过的结果已锁定" : "审核员只能查看和审核任务";
+    return;
+  }
   activeTool.value = tool;
   draftShape.value = null;
   polygonDraft.value = [];
@@ -649,16 +912,19 @@ function resizeSelectedBox(point: Point) {
 }
 
 function addShape(shape: AnnotationShape) {
+  if (editingDisabled.value) return;
   setShapes([...annotationShapes.value, shape]);
   selectedShapeId.value = shape.id;
   activeTool.value = "select";
 }
 
 function updateShape(shapeId: string, patch: Partial<AnnotationShape>) {
+  if (editingDisabled.value) return;
   setShapes(annotationShapes.value.map((shape) => (shape.id === shapeId ? { ...shape, ...patch } : shape)));
 }
 
 function removeSelectedShape() {
+  if (editingDisabled.value) return;
   if (!selectedShapeId.value) return;
   setShapes(annotationShapes.value.filter((shape) => shape.id !== selectedShapeId.value));
   selectedShapeId.value = null;
@@ -669,14 +935,89 @@ function selectShape(shapeId: string) {
   activeTool.value = "select";
 }
 
+function selectPresetLabel(label: LabelConfig) {
+  activePresetLabelId.value = label.labelId;
+  if (selectedShape.value) {
+    updateShape(selectedShape.value.id, {
+      labelId: label.labelId,
+      label: `${label.englishName} / ${label.chineseName}`,
+      source: "edited",
+    });
+  }
+}
+
+function labelShortcut(index: number) {
+  if (index < 0 || index >= 20) return "";
+  const slot = index % 10;
+  const key = slot === 9 ? "0" : String(slot + 1);
+  return index >= 10 ? `Shift+${key}` : key;
+}
+
+function shortcutLabel(event: KeyboardEvent) {
+  const match = event.code.match(/^Digit([0-9])$/);
+  if (!match || event.altKey || event.ctrlKey || event.metaKey) return null;
+  const digit = Number(match[1]);
+  const slot = digit === 0 ? 9 : digit - 1;
+  return labels.value[(event.shiftKey ? 10 : 0) + slot] ?? null;
+}
+
 function handleGlobalKeydown(event: KeyboardEvent) {
   const target = event.target as HTMLElement | null;
   if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
   if (currentPage.value !== "workspace") return;
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    if (!editingDisabled.value) void saveAnnotationSnapshot();
+    return;
+  }
+  const presetLabel = shortcutLabel(event);
+  if (presetLabel) {
+    event.preventDefault();
+    selectPresetLabel(presetLabel);
+    return;
+  }
+  const toolByKey: Partial<Record<string, AnnotationTool>> = { v: "select", h: "pan", b: "box", p: "polygon", l: "line" };
+  const tool = toolByKey[event.key.toLowerCase()];
+  if (tool) {
+    event.preventDefault();
+    setTool(tool);
+    return;
+  }
+  if (event.key === "Enter" && polygonDraft.value.length >= 3) {
+    event.preventDefault();
+    finishPolygon();
+    return;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    cancelPolygon();
+    selectedShapeId.value = null;
+    setTool("select");
+    return;
+  }
+  if (event.key.toLowerCase() === "f") {
+    event.preventDefault();
+    fitView();
+    return;
+  }
+  if (event.key.toLowerCase() === "a" || event.key.toLowerCase() === "d") {
+    event.preventDefault();
+    void selectAdjacentImage(event.key.toLowerCase() === "a" ? -1 : 1);
+    return;
+  }
+  if (event.key === "+" || event.key === "=") view.zoom = Math.min(5, view.zoom + 0.1);
+  if (event.key === "-" || event.key === "_") view.zoom = Math.max(0.2, view.zoom - 0.1);
   if ((event.key === "Delete" || event.key === "Backspace") && selectedShapeId.value) {
     event.preventDefault();
     removeSelectedShape();
   }
+}
+
+async function selectAdjacentImage(direction: -1 | 1) {
+  const currentIndex = imageHistoryList.value.findIndex((image) => image.imageId === currentState.value.currentImageId);
+  const nextIndex = Math.min(imageHistoryList.value.length - 1, Math.max(0, currentIndex + direction));
+  const image = imageHistoryList.value[nextIndex];
+  if (image && nextIndex !== currentIndex) await selectImage(image);
 }
 
 function setShapes(shapes: AnnotationShape[]) {
@@ -750,7 +1091,7 @@ function serializeShape(shape: AnnotationShape) {
 }
 
 function makeShape(type: ShapeType, points: Point[], label = defaultLabelText(), score?: number, source: AnnotationShape["source"] = "manual") {
-  const labelConfig = source === "ai" ? labels.value.find((item) => item.englishName === label) : labels.value[0];
+  const labelConfig = source === "ai" ? labels.value.find((item) => item.englishName === label) : activePresetLabel.value;
   return {
     id: newId("shape"),
     type,
@@ -901,16 +1242,25 @@ function originalView() {
 }
 
 async function runBusy(action: () => Promise<void>, fallback: string) {
-  loading.value = true;
+  activeRequestCount.value += 1;
   message.value = "";
   try {
     await action();
   } catch (error) {
-    message.value = error instanceof Error ? error.message : fallback;
+    const detail = error instanceof Error && error.message ? error.message : fallback;
+    if (error instanceof ApiRequestError && error.status === 401) {
+      currentUser.value = null;
+    }
+    message.value = detail;
+    errorDialog.value = detail;
   } finally {
-    loading.value = false;
+    activeRequestCount.value = Math.max(0, activeRequestCount.value - 1);
     processingOverlayText.value = "";
   }
+}
+
+function currentImageSessionId() {
+  return currentState.value.imageInfo?.sessionId || defaultSessionId;
 }
 
 function playCaption() {
@@ -958,20 +1308,11 @@ function createDefaultTaskState(): TaskState {
     activeVersionId: null,
     latestVersionNo: null,
     isViewingHistory: false,
+    reviewStatus: "draft",
+    reviewComment: "",
+    submittedAt: null,
+    reviewedAt: null,
   };
-}
-
-function getSessionId() {
-  const key = "railway-image-session-id";
-  const existing = window.localStorage.getItem(key);
-  if (existing) return existing;
-  const uuid =
-    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID()
-      : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-  const created = `session_${uuid}`;
-  window.localStorage.setItem(key, created);
-  return created;
 }
 
 function defaultLabelText() {
@@ -1001,13 +1342,32 @@ function formatTime(value?: string) {
   return new Date(value).toLocaleString();
 }
 
+function formatDuration(value?: number | null) {
+  if (!value) return "-";
+  return formatTimestamp(value);
+}
+
+function formatTimestamp(value?: number | null) {
+  if (!value) return "00:00";
+  const totalSeconds = Math.floor(value / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const base = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return hours > 0 ? `${String(hours).padStart(2, "0")}:${base}` : base;
+}
+
 function statusText(status: ImageTaskStatus) {
   return { idle: "未处理", pending: "待处理", processing: "处理中", success: "已完成", failed: "失败" }[status];
+}
+
+function reviewStatusText(status: ImageReviewStatus) {
+  return { draft: "草稿", pending_review: "待审核", approved: "已通过", rejected: "已驳回" }[status];
 }
 </script>
 
 <template>
-  <main class="app-shell image-task-workspace">
+  <main v-if="currentUser" class="app-shell image-task-workspace">
     <header class="topbar">
       <div class="brand">
         <img :src="'/favicon.svg'" alt="" />
@@ -1016,10 +1376,19 @@ function statusText(status: ImageTaskStatus) {
           <span>{{ loading ? "处理中" : "就绪" }}<template v-if="message"> · {{ message }}</template></span>
         </div>
       </div>
-      <nav class="task-tabs" aria-label="工作区">
-        <button :class="{ active: currentPage === 'workspace' }" @click="currentPage = 'workspace'"><Boxes :size="16" />标注工作台</button>
-        <button :class="{ active: currentPage === 'settings' }" @click="currentPage = 'settings'"><Settings :size="16" />系统配置</button>
-      </nav>
+      <div class="topbar-actions">
+        <nav class="task-tabs" aria-label="工作区">
+          <button :class="{ active: currentPage === 'workspace' }" @click="setPage('workspace')"><Boxes :size="16" />标注工作台</button>
+          <button :class="{ active: currentPage === 'videoCaptions' }" @click="setPage('videoCaptions')"><Film :size="16" />视频解帧</button>
+          <button :class="{ active: currentPage === 'liveGesture' }" @click="setPage('liveGesture')"><Camera :size="16" />实时手势</button>
+          <button :class="{ active: currentPage === 'settings' }" @click="setPage('settings')"><Settings :size="16" />系统配置</button>
+        </nav>
+        <div class="user-session">
+          <UserRound :size="17" />
+          <span><strong>{{ currentUser.displayName }}</strong><small>{{ currentUser.username }}</small></span>
+          <button title="退出登录" aria-label="退出登录" @click="signOut"><LogOut :size="16" /></button>
+        </div>
+      </div>
     </header>
 
     <nav v-if="currentPage === 'workspace'" class="task-strip" aria-label="功能页面">
@@ -1091,22 +1460,22 @@ function statusText(status: ImageTaskStatus) {
                 <option v-for="model in currentConfig.models" :key="model" :value="model">{{ model }}</option>
               </select>
             </label>
-            <button :disabled="!currentState.currentImageId || loading" @click="runCurrentTask">
+            <button :disabled="!currentState.currentImageId || loading || editingDisabled" @click="runCurrentTask">
               <Loader2 v-if="loading" class="spin" :size="16" />
               <Sparkles v-else :size="16" />
               开始处理
             </button>
-            <button :disabled="!currentState.currentImageId || loading" @click="saveCurrentResult"><Save :size="16" />保存结果</button>
-            <button :disabled="!currentState.currentImageId || loading" @click="saveAnnotationSnapshot"><Download :size="16" />保存标注</button>
+            <button :disabled="!currentState.currentImageId || loading || editingDisabled" @click="saveCurrentResult"><Save :size="16" />保存结果</button>
+            <button :disabled="!currentState.currentImageId || loading || editingDisabled" @click="saveAnnotationSnapshot"><Download :size="16" />保存标注</button>
           </div>
         </div>
 
         <div class="annotation-toolbar">
           <button :class="{ active: activeTool === 'select' }" title="选择" @click="setTool('select')"><MousePointer2 :size="16" />（选择）</button>
           <button :class="{ active: activeTool === 'pan' }" title="移动画布" @click="setTool('pan')"><Move :size="16" />（移动）</button>
-          <button :class="{ active: activeTool === 'box' }" title="矩形框" @click="setTool('box')"><Boxes :size="16" />（矩形框）</button>
-          <button :class="{ active: activeTool === 'polygon' }" title="多边形" @click="setTool('polygon')"><Pentagon :size="16" />（多边形）</button>
-          <button :class="{ active: activeTool === 'line' }" title="线段" @click="setTool('line')"><Waypoints :size="16" />（线段）</button>
+          <button :disabled="editingDisabled" :class="{ active: activeTool === 'box' }" title="矩形框（B）" @click="setTool('box')"><Boxes :size="16" />（矩形框）</button>
+          <button :disabled="editingDisabled" :class="{ active: activeTool === 'polygon' }" title="多边形（P）" @click="setTool('polygon')"><Pentagon :size="16" />（多边形）</button>
+          <button :disabled="editingDisabled" :class="{ active: activeTool === 'line' }" title="线段（L）" @click="setTool('line')"><Waypoints :size="16" />（线段）</button>
           <button :disabled="polygonDraft.length < 3" @click="finishPolygon"><Check :size="16" />（完成）</button>
           <button :disabled="polygonDraft.length === 0" @click="cancelPolygon"><RotateCcw :size="16" />（取消）</button>
         </div>
@@ -1235,9 +1604,36 @@ function statusText(status: ImageTaskStatus) {
             <dd>{{ formatBytes(currentState.imageInfo.fileSize) }}</dd>
           </dl>
 
+          <section class="result-summary label-preset-summary">
+            <div class="preset-heading">
+              <h2>标签预设</h2>
+              <span>{{ labels.length }} 类</span>
+            </div>
+            <div v-if="labels.length === 0" class="empty-state">请先在系统配置中添加标签</div>
+            <div v-else class="label-preset-grid">
+              <button
+                v-for="entry in presetLabels"
+                :key="entry.label.labelId"
+                class="preset-label-button"
+                :class="{ active: entry.label.labelId === activePresetLabel?.labelId }"
+                :title="entry.shortcut ? `快捷键 ${entry.shortcut}` : `标签 #${entry.label.labelId}`"
+                @click="selectPresetLabel(entry.label)"
+              >
+                <kbd v-if="entry.shortcut">{{ entry.shortcut.replace('Shift+', '⇧') }}</kbd>
+                <kbd v-else>--</kbd>
+                <span>
+                  <strong>#{{ entry.label.labelId }} {{ entry.label.chineseName }}</strong>
+                  <small>{{ entry.label.englishName }}</small>
+                </span>
+              </button>
+            </div>
+          </section>
+
           <section class="result-summary">
             <h2>选中对象</h2>
-            <div v-if="!selectedShape" class="empty-state">选择或新增一个标注对象</div>
+            <div v-if="!selectedShape" class="empty-state">
+              下一个标注：{{ activePresetLabel ? `#${activePresetLabel.labelId} ${activePresetLabel.chineseName}` : "未配置" }}
+            </div>
             <template v-else>
               <label class="field-label">
                 <span>标签</span>
@@ -1291,6 +1687,29 @@ function statusText(status: ImageTaskStatus) {
             <div v-else class="result-row"><strong>标注对象</strong><span>{{ annotationShapes.length }} 个</span></div>
           </section>
 
+          <section class="result-summary review-summary">
+            <div class="review-heading">
+              <h2>审核状态</h2>
+              <span class="review-status" :class="`status-${currentState.reviewStatus}`">{{ reviewStatusText(currentState.reviewStatus) }}</span>
+            </div>
+            <p v-if="currentState.reviewComment" class="review-comment">{{ currentState.reviewComment }}</p>
+            <small v-if="currentState.reviewedAt">审核时间：{{ formatTime(currentState.reviewedAt) }}</small>
+            <button
+              v-if="!canReview"
+              :disabled="!currentState.taskId || currentState.status === 'idle' || currentState.reviewStatus === 'pending_review' || resultLocked || loading"
+              @click="submitForReview"
+            >
+              <Check :size="16" />提交审核
+            </button>
+            <template v-else-if="currentState.reviewStatus === 'pending_review'">
+              <textarea v-model="reviewCommentInput" rows="3" placeholder="填写审核意见，驳回时建议说明修改位置"></textarea>
+              <div class="review-actions">
+                <button @click="reviewCurrentResult('approved')"><Check :size="16" />通过</button>
+                <button class="danger-button" @click="reviewCurrentResult('rejected')"><RotateCcw :size="16" />驳回</button>
+              </div>
+            </template>
+          </section>
+
           <section class="result-summary version-summary">
             <h2>历史版本</h2>
             <div v-if="currentState.versions.length === 0" class="empty-state">暂无保存版本</div>
@@ -1314,6 +1733,104 @@ function statusText(status: ImageTaskStatus) {
       </aside>
     </section>
 
+    <section v-else-if="currentPage === 'videoCaptions'" class="video-caption-page">
+      <aside class="video-list-panel">
+        <div class="panel-head">
+          <strong>视频批次</strong>
+          <button :disabled="loading" title="刷新" @click="loadVideoCaptionBatches"><RefreshCw :size="16" /></button>
+        </div>
+        <div class="batch-summary" v-if="selectedVideoCaptionBatch">
+          <strong>{{ selectedVideoCaptionBatch.name }}</strong>
+          <span>{{ selectedVideoCaptionBatch.totalVideos }} 个视频 · {{ selectedVideoCaptionBatch.totalFrames }} 帧 · {{ selectedVideoCaptionBatch.status }}</span>
+        </div>
+        <div class="video-list">
+          <button
+            v-for="batch in videoCaptionBatches"
+            :key="batch.batchId"
+            class="video-row batch-row"
+            :class="{ selected: batch.batchId === selectedVideoCaptionBatchId }"
+            @click="selectVideoCaptionBatch(batch.batchId)"
+          >
+            <strong>{{ batch.name }}</strong>
+            <span>{{ batch.totalVideos }} 视频 · {{ batch.totalFrames }} 帧</span>
+          </button>
+          <div v-if="videoCaptionBatches.length === 0" class="empty-state">暂无解帧批次</div>
+        </div>
+
+        <div class="panel-head sub-head">
+          <strong>视频列表</strong>
+        </div>
+        <div class="video-list">
+          <button
+            v-for="video in videoCaptionVideos"
+            :key="video.videoId"
+            class="video-row"
+            :class="{ selected: video.videoId === selectedVideoCaptionVideoId }"
+            @click="selectVideoCaptionVideo(video.videoId)"
+          >
+            <strong>{{ video.displayName || video.filename }}</strong>
+            <span>{{ formatDuration(video.durationMs) }} · {{ video.status }}</span>
+            <span class="keyword-list">
+              <small v-for="keyword in video.keywords" :key="keyword">{{ keyword }}</small>
+            </span>
+          </button>
+          <div v-if="videoCaptionVideos.length === 0" class="empty-state">暂无视频记录</div>
+        </div>
+      </aside>
+
+      <section class="frame-browser">
+        <div class="frame-toolbar">
+          <div>
+            <strong>{{ selectedVideoCaptionVideo?.displayName || selectedVideoCaptionVideo?.filename || "请选择视频" }}</strong>
+            <span>{{ videoCaptionTotal }} 帧记录</span>
+          </div>
+          <form class="frame-search" @submit.prevent="searchVideoCaptionFrames">
+            <Search :size="16" />
+            <input v-model="videoCaptionQuery" placeholder="搜索人员、轨道、车辆、安全风险" />
+            <button :disabled="loading">搜索</button>
+          </form>
+        </div>
+        <div class="frame-grid">
+          <button
+            v-for="frame in videoCaptionFrames"
+            :key="frame.frameId"
+            class="frame-card"
+            :class="{ selected: frame.frameId === selectedVideoCaptionFrameId }"
+            @click="selectVideoCaptionFrame(frame.frameId)"
+          >
+            <img :src="assetUrl(frame.imageUrl)" alt="" />
+            <span>{{ formatTimestamp(frame.timestampMs) }}</span>
+          </button>
+          <div v-if="videoCaptionFrames.length === 0" class="empty-state">暂无匹配帧</div>
+        </div>
+      </section>
+
+      <aside class="frame-detail-panel">
+        <template v-if="selectedVideoCaptionFrame">
+          <div class="frame-preview">
+            <img :src="assetUrl(selectedVideoCaptionFrame.imageUrl)" alt="视频帧" />
+          </div>
+          <dl class="image-info">
+            <dt>时间</dt>
+            <dd>{{ formatTimestamp(selectedVideoCaptionFrame.timestampMs) }}</dd>
+            <dt>帧号</dt>
+            <dd>{{ selectedVideoCaptionFrame.frameIndex }}</dd>
+            <dt>模型</dt>
+            <dd>{{ selectedVideoCaptionFrame.modelId }}</dd>
+            <dt>状态</dt>
+            <dd>{{ selectedVideoCaptionFrame.status }}</dd>
+          </dl>
+          <section class="result-summary">
+            <h2>DeepSeek 描述</h2>
+            <p class="caption-text">{{ selectedVideoCaptionFrame.descriptionText || selectedVideoCaptionFrame.error || "暂无描述" }}</p>
+          </section>
+        </template>
+        <div v-else class="empty-state detail-empty">请选择一个视频帧</div>
+      </aside>
+    </section>
+
+    <LiveGesturePage v-else-if="currentPage === 'liveGesture'" />
+
     <section v-else class="settings-page">
       <div class="settings-header">
         <div>
@@ -1323,7 +1840,7 @@ function statusText(status: ImageTaskStatus) {
         <button :disabled="loading" @click="loadLabels"><RefreshCw :size="16" />刷新</button>
       </div>
 
-      <form class="label-form" @submit.prevent="submitLabel">
+      <form v-if="isAdmin" class="label-form" @submit.prevent="submitLabel">
         <label class="field-label"><span>英文名称</span><input v-model="labelForm.englishName" required placeholder="person" /></label>
         <label class="field-label"><span>中文名称</span><input v-model="labelForm.chineseName" required placeholder="行人" /></label>
         <label class="field-label wide"><span>描述信息</span><textarea v-model="labelForm.description" rows="2" placeholder="标签使用范围、边界说明或审核标准"></textarea></label>
@@ -1343,7 +1860,7 @@ function statusText(status: ImageTaskStatus) {
             <textarea v-model="editingLabel.description" rows="2"></textarea>
             <span>{{ formatTime(label.createdAt) }}</span>
             <span>{{ formatTime(label.updatedAt) }}</span>
-            <span class="row-actions">
+            <span v-if="isAdmin" class="row-actions">
               <button @click="submitEditLabel(label.labelId)"><Save :size="15" /></button>
               <button @click="editingLabelId = null"><RotateCcw :size="15" /></button>
             </span>
@@ -1354,7 +1871,7 @@ function statusText(status: ImageTaskStatus) {
             <span>{{ label.description || "-" }}</span>
             <span>{{ formatTime(label.createdAt) }}</span>
             <span>{{ formatTime(label.updatedAt) }}</span>
-            <span class="row-actions">
+            <span v-if="isAdmin" class="row-actions">
               <button title="编辑" @click="startEditLabel(label)"><Edit3 :size="15" /></button>
               <button title="复制标签" @click="duplicateLabel(label.labelId)"><Copy :size="15" /></button>
               <button title="删除" @click="removeLabel(label.labelId)"><Trash2 :size="15" /></button>
@@ -1362,12 +1879,110 @@ function statusText(status: ImageTaskStatus) {
           </template>
         </div>
       </div>
+
+      <template v-if="isAdmin">
+        <div class="settings-header user-admin-header">
+          <div>
+            <h2><UserRound :size="22" />账号与角色</h2>
+            <p>学生负责标注，审核员负责通过或驳回，管理员可维护标签和账号角色。</p>
+          </div>
+          <button :disabled="loading" @click="loadUsers"><RefreshCw :size="16" />刷新</button>
+        </div>
+        <div class="user-admin-list">
+          <div v-for="user in users" :key="user.userId" class="user-admin-row">
+            <span><strong>{{ user.displayName }}</strong><small>{{ user.username }}</small></span>
+            <select :value="user.role" :disabled="user.userId === currentUser?.userId" @change="handleRoleChange(user.userId, $event)">
+              <option value="student">学生</option>
+              <option value="reviewer">审核员</option>
+              <option value="admin">管理员</option>
+            </select>
+          </div>
+        </div>
+      </template>
     </section>
+
+    <div v-if="loading" class="system-loading-backdrop" role="status" aria-live="polite" aria-label="正在加载后台数据">
+      <div class="system-loading-dialog">
+        <Loader2 class="spin" :size="28" />
+        <strong>{{ processingOverlayText || "正在加载后台数据" }}</strong>
+        <span>请稍候，数据将从后台服务读取</span>
+      </div>
+    </div>
+
+    <div v-if="errorDialog" class="system-error-backdrop" role="alertdialog" aria-modal="true" aria-labelledby="system-error-title">
+      <div class="system-error-dialog">
+        <div>
+          <strong id="system-error-title">操作失败</strong>
+          <span>{{ errorDialog }}</span>
+        </div>
+        <button autofocus @click="errorDialog = ''">关闭</button>
+      </div>
+    </div>
 
     <div v-if="originalPreview" class="modal-backdrop" @click="originalPreview = null">
       <div class="original-modal" @click.stop>
         <img :src="assetUrl(originalPreview.imageUrl)" alt="原图预览" />
         <button @click="originalPreview = null">关闭</button>
+      </div>
+    </div>
+  </main>
+
+  <main v-else class="auth-shell">
+    <section class="auth-panel" aria-labelledby="auth-title">
+      <div class="auth-brand">
+        <img :src="'/favicon.svg'" alt="" />
+        <div>
+          <h1 id="auth-title">铁路多目标识别平台</h1>
+          <span>学生标注与智能识别工作台</span>
+        </div>
+      </div>
+
+      <div class="auth-mode" role="tablist" aria-label="账号操作">
+        <button :class="{ active: authMode === 'login' }" type="button" @click="authMode = 'login'">登录</button>
+        <button :class="{ active: authMode === 'register' }" type="button" @click="authMode = 'register'">注册</button>
+      </div>
+
+      <form class="auth-form" @submit.prevent="submitAuth">
+        <label>
+          <span>学号或账号</span>
+          <input v-model="authForm.username" required minlength="3" maxlength="50" autocomplete="username" placeholder="请输入学号或账号" />
+        </label>
+        <label v-if="authMode === 'register'">
+          <span>学生姓名</span>
+          <input v-model="authForm.displayName" required maxlength="80" autocomplete="name" placeholder="请输入姓名" />
+        </label>
+        <label>
+          <span>密码</span>
+          <input
+            v-model="authForm.password"
+            required
+            :minlength="authMode === 'register' ? 6 : 1"
+            maxlength="128"
+            type="password"
+            :autocomplete="authMode === 'login' ? 'current-password' : 'new-password'"
+            placeholder="请输入密码"
+          />
+        </label>
+        <button class="auth-submit" :disabled="loading || !authReady">
+          <Loader2 v-if="loading" class="spin" :size="17" />
+          <UserRound v-else :size="17" />
+          {{ authMode === "login" ? "登录系统" : "创建学生账号" }}
+        </button>
+      </form>
+    </section>
+
+    <div v-if="loading" class="system-loading-backdrop" role="status" aria-live="polite">
+      <div class="system-loading-dialog">
+        <Loader2 class="spin" :size="28" />
+        <strong>{{ authReady ? "正在验证账号" : "正在恢复登录状态" }}</strong>
+        <span>登录状态由后台数据库持久化保存</span>
+      </div>
+    </div>
+
+    <div v-if="errorDialog" class="system-error-backdrop" role="alertdialog" aria-modal="true">
+      <div class="system-error-dialog">
+        <div><strong>操作失败</strong><span>{{ errorDialog }}</span></div>
+        <button autofocus @click="errorDialog = ''">关闭</button>
       </div>
     </div>
   </main>

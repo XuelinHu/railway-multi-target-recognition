@@ -1,12 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.api.auth import require_reviewer, require_user
 from app.core.dependencies import get_store
 from app.models.schemas import (
     ApiResponse,
+    AuthUser,
     ImageTaskAnnotationUpdateRequest,
     ImageTaskCreateRequest,
     ImageTaskResult,
     ImageTaskResultSaveRequest,
+    ImageTaskReviewRequest,
     ImageTaskResultVersion,
     ImageTaskType,
 )
@@ -20,15 +23,17 @@ router = APIRouter(prefix="/api/image-tasks", tags=["image-workspace"])
 def create_image_task(
     request: ImageTaskCreateRequest,
     store: PostgresStore = Depends(get_store),
+    current_user: AuthUser = Depends(require_user),
 ) -> ApiResponse:
-    image = store.get_image_asset(request.image_id)
+    _require_edit_permission(current_user)
+    image = store.get_accessible_image_asset(request.image_id, current_user.user_id)
     if image is None:
         raise HTTPException(status_code=404, detail="当前图片不存在")
     task = store.create_or_get_image_task(
         request.image_id,
         request.task_type,
         request.session_id or "default",
-        request.user_id,
+        current_user.user_id,
     )
     return ApiResponse(data=_task_payload(task))
 
@@ -37,9 +42,12 @@ def create_image_task(
 def save_image_task_result(
     request: ImageTaskResultSaveRequest,
     store: PostgresStore = Depends(get_store),
+    current_user: AuthUser = Depends(require_user),
 ) -> ApiResponse:
-    if store.get_image_asset(request.image_id) is None:
+    _require_edit_permission(current_user)
+    if store.get_accessible_image_asset(request.image_id, current_user.user_id) is None:
         raise HTTPException(status_code=404, detail="当前图片不存在")
+    _ensure_result_editable(store, request.task_id)
     result = ImageTaskResult(
         task_id=request.task_id,
         image_id=request.image_id,
@@ -62,7 +70,9 @@ def list_image_task_result_versions(
     task_type: ImageTaskType = Query(alias="taskType"),
     session_id: str = Query(default="default", alias="sessionId"),
     store: PostgresStore = Depends(get_store),
+    current_user: AuthUser = Depends(require_user),
 ) -> ApiResponse:
+    _require_image_access(store, image_id, current_user)
     versions = store.list_image_task_result_versions(image_id, task_type, session_id or "default")
     return ApiResponse(data=[_version_payload(version) for version in versions])
 
@@ -71,10 +81,12 @@ def list_image_task_result_versions(
 def get_image_task_result_version(
     version_id: str,
     store: PostgresStore = Depends(get_store),
+    current_user: AuthUser = Depends(require_user),
 ) -> ApiResponse:
     version = store.get_image_task_result_version(version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="历史版本不存在")
+    _require_image_access(store, version.image_id, current_user)
     return ApiResponse(data=_version_payload(version))
 
 
@@ -82,7 +94,14 @@ def get_image_task_result_version(
 def restore_image_task_result_version(
     version_id: str,
     store: PostgresStore = Depends(get_store),
+    current_user: AuthUser = Depends(require_user),
 ) -> ApiResponse:
+    _require_edit_permission(current_user)
+    existing = store.get_image_task_result_version(version_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="历史版本不存在")
+    _require_image_access(store, existing.image_id, current_user)
+    _ensure_result_editable(store, existing.task_id)
     restored = store.restore_image_task_result_version(version_id)
     if restored is None:
         raise HTTPException(status_code=404, detail="历史版本不存在")
@@ -96,7 +115,9 @@ def get_image_task_result(
     task_type: ImageTaskType = Query(alias="taskType"),
     session_id: str = Query(default="default", alias="sessionId"),
     store: PostgresStore = Depends(get_store),
+    current_user: AuthUser = Depends(require_user),
 ) -> ApiResponse:
+    _require_image_access(store, image_id, current_user)
     result = store.get_image_task_result(image_id, task_type, session_id or "default")
     if result is None:
         return ApiResponse(message="no result", data=None)
@@ -107,7 +128,11 @@ def get_image_task_result(
 def update_image_task_annotation(
     request: ImageTaskAnnotationUpdateRequest,
     store: PostgresStore = Depends(get_store),
+    current_user: AuthUser = Depends(require_user),
 ) -> ApiResponse:
+    _require_edit_permission(current_user)
+    _require_image_access(store, request.image_id, current_user)
+    _ensure_result_editable(store, request.task_id)
     result = store.update_image_task_annotation(
         request.task_id,
         request.image_id,
@@ -117,6 +142,52 @@ def update_image_task_annotation(
     if result is None:
         raise HTTPException(status_code=404, detail="当前任务结果不存在")
     return ApiResponse(data=_result_payload(result))
+
+
+@router.post("/result/{task_id}/submit", response_model=ApiResponse)
+def submit_image_task_result(
+    task_id: str,
+    store: PostgresStore = Depends(get_store),
+    current_user: AuthUser = Depends(require_user),
+) -> ApiResponse:
+    result = store.submit_image_task_result(task_id, current_user.user_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail="任务不存在、不属于当前用户或当前状态不能提交")
+    return ApiResponse(data=_result_payload(result))
+
+
+@router.post("/result/{task_id}/review", response_model=ApiResponse)
+def review_image_task_result(
+    task_id: str,
+    request: ImageTaskReviewRequest,
+    store: PostgresStore = Depends(get_store),
+    current_user: AuthUser = Depends(require_reviewer),
+) -> ApiResponse:
+    result = store.review_image_task_result(task_id, request.status, request.comment, current_user.user_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail="只有其他用户提交的待审核任务可以执行审核")
+    return ApiResponse(data=_result_payload(result))
+
+
+def _require_image_access(store: PostgresStore, image_id: str, current_user: AuthUser) -> None:
+    image = (
+        store.get_image_asset(image_id)
+        if current_user.role in {"reviewer", "admin"}
+        else store.get_accessible_image_asset(image_id, current_user.user_id)
+    )
+    if image is None:
+        raise HTTPException(status_code=404, detail="当前图片不存在或无权访问")
+
+
+def _require_edit_permission(current_user: AuthUser) -> None:
+    if current_user.role == "reviewer":
+        raise HTTPException(status_code=403, detail="审核员只能查看和审核任务，不能修改标注")
+
+
+def _ensure_result_editable(store: PostgresStore, task_id: str) -> None:
+    result = store.get_image_task_result_by_task_id(task_id)
+    if result is not None and result.review_status == "approved":
+        raise HTTPException(status_code=409, detail="审核通过的任务已经锁定，不能继续修改")
 
 
 def _task_payload(task) -> dict:
@@ -146,6 +217,12 @@ def _result_payload(result: ImageTaskResult) -> dict:
         "modelId": result.model_id,
         "latestVersionId": result.latest_version_id,
         "latestVersionNo": result.latest_version_no,
+        "reviewStatus": result.review_status,
+        "submittedBy": result.submitted_by,
+        "submittedAt": result.submitted_at.isoformat() if result.submitted_at else None,
+        "reviewedBy": result.reviewed_by,
+        "reviewedAt": result.reviewed_at.isoformat() if result.reviewed_at else None,
+        "reviewComment": result.review_comment,
         "createdAt": result.created_at.isoformat(),
         "updatedAt": result.updated_at.isoformat(),
     }

@@ -1,5 +1,6 @@
 export type ImageTaskType = "detection" | "segmentation" | "pose" | "classification" | "caption";
 export type ImageTaskStatus = "idle" | "pending" | "processing" | "success" | "failed";
+export type ImageReviewStatus = "draft" | "pending_review" | "approved" | "rejected";
 
 export type ImageAsset = {
   imageId: string;
@@ -15,6 +16,12 @@ export type ImageAsset = {
   sessionId?: string;
   createdAt: string;
   updatedAt?: string;
+  reviewStatus: ImageReviewStatus;
+  submittedBy?: string | null;
+  submittedAt?: string | null;
+  reviewedBy?: string | null;
+  reviewedAt?: string | null;
+  reviewComment?: string;
   hasCurrentTaskResult: boolean;
   taskStatus: ImageTaskStatus;
 };
@@ -78,19 +85,95 @@ export type LabelConfig = {
   updatedAt: string;
 };
 
+export type VideoCaptionBatch = {
+  batchId: string;
+  name: string;
+  sourceDir: string;
+  outputDir: string;
+  modelId: string;
+  prompt: string;
+  frameIntervalSeconds: number;
+  status: "pending" | "processing" | "success" | "failed";
+  totalVideos: number;
+  totalFrames: number;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type VideoCaptionVideo = {
+  videoId: string;
+  batchId: string;
+  filename: string;
+  displayName: string;
+  keywords: string[];
+  sourcePath: string;
+  frameDir: string;
+  fps?: number | null;
+  width?: number | null;
+  height?: number | null;
+  frameCount?: number | null;
+  durationMs?: number | null;
+  status: "pending" | "processing" | "success" | "failed";
+  error: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type VideoCaptionFrame = {
+  frameId: string;
+  batchId: string;
+  videoId: string;
+  frameIndex: number;
+  timestampMs: number;
+  imagePath: string;
+  imageUrl: string;
+  width?: number | null;
+  height?: number | null;
+  descriptionText: string;
+  modelId: string;
+  status: "pending" | "processing" | "success" | "failed";
+  error: string;
+  resultJson: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type VideoCaptionFrameData = {
+  records: VideoCaptionFrame[];
+  total: number;
+};
+
 export type ApiEnvelope<T> = {
   code: number;
   message: string;
   data: T;
 };
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8010";
+export type AuthUser = {
+  userId: string;
+  username: string;
+  displayName: string;
+  role: string;
+};
+
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
+
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE_URL}${path}`;
   let response: Response;
   try {
-    response = await fetch(url, options);
+    response = await fetch(url, { credentials: "include", ...options });
   } catch (error) {
     console.error("[API] Network error", {
       url,
@@ -114,7 +197,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       status: response.status,
       detail,
     });
-    throw new Error(detail || `HTTP ${response.status}`);
+    throw new ApiRequestError(detail || `HTTP ${response.status}`, response.status);
   }
   return response.json() as Promise<T>;
 }
@@ -122,6 +205,42 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 async function apiData<T>(path: string, options?: RequestInit): Promise<T> {
   const payload = await request<ApiEnvelope<T>>(path, options);
   return payload.data;
+}
+
+export function getCurrentUser(): Promise<AuthUser | null> {
+  return apiData<AuthUser | null>("/api/auth/me");
+}
+
+export function login(data: { username: string; password: string }): Promise<AuthUser> {
+  return apiData<AuthUser>("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function register(data: { username: string; displayName: string; password: string }): Promise<AuthUser> {
+  return apiData<AuthUser>("/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function logout(): Promise<{ loggedOut: boolean }> {
+  return apiData<{ loggedOut: boolean }>("/api/auth/logout", { method: "POST" });
+}
+
+export function listUsers(): Promise<AuthUser[]> {
+  return apiData<AuthUser[]>("/api/auth/users");
+}
+
+export function updateUserRole(userId: string, role: "student" | "reviewer" | "admin"): Promise<AuthUser> {
+  return apiData<AuthUser>(`/api/auth/users/${userId}/role`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
 }
 
 export function uploadImage(file: File, taskType: ImageTaskType, sessionId: string): Promise<ImageAsset> {
@@ -136,13 +255,13 @@ export function listImages(params: {
   taskType?: ImageTaskType;
   page?: number;
   pageSize?: number;
-  sessionId: string;
+  sessionId?: string;
 }): Promise<ImageHistoryData> {
   const query = new URLSearchParams();
   if (params.taskType) query.set("taskType", params.taskType);
   query.set("page", String(params.page ?? 1));
   query.set("pageSize", String(params.pageSize ?? 50));
-  query.set("sessionId", params.sessionId);
+  if (params.sessionId) query.set("sessionId", params.sessionId);
   return apiData<ImageHistoryData>(`/api/images/list?${query.toString()}`);
 }
 
@@ -225,6 +344,18 @@ export function updateAnnotation(data: {
   });
 }
 
+export function submitTaskResult(taskId: string): Promise<ImageTaskResult> {
+  return apiData<ImageTaskResult>(`/api/image-tasks/result/${taskId}/submit`, { method: "POST" });
+}
+
+export function reviewTaskResult(taskId: string, status: "approved" | "rejected", comment: string): Promise<ImageTaskResult> {
+  return apiData<ImageTaskResult>(`/api/image-tasks/result/${taskId}/review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status, comment }),
+  });
+}
+
 export function inferImageTask(data: {
   imageId: string;
   taskType: ImageTaskType;
@@ -276,6 +407,28 @@ export function copyLabel(labelId: number): Promise<LabelConfig> {
 
 export function deleteLabel(labelId: number): Promise<{ deleted: boolean }> {
   return apiData<{ deleted: boolean }>(`/api/labels/${labelId}`, { method: "DELETE" });
+}
+
+export function listVideoCaptionBatches(): Promise<VideoCaptionBatch[]> {
+  return apiData<VideoCaptionBatch[]>("/api/video-captions/batches");
+}
+
+export function listVideoCaptionVideos(batchId: string): Promise<VideoCaptionVideo[]> {
+  return apiData<VideoCaptionVideo[]>(`/api/video-captions/batches/${batchId}/videos`);
+}
+
+export function listVideoCaptionFrames(params: {
+  videoId: string;
+  page?: number;
+  pageSize?: number;
+  query?: string;
+}): Promise<VideoCaptionFrameData> {
+  const query = new URLSearchParams({
+    page: String(params.page ?? 1),
+    pageSize: String(params.pageSize ?? 200),
+  });
+  if (params.query) query.set("query", params.query);
+  return apiData<VideoCaptionFrameData>(`/api/video-captions/videos/${params.videoId}/frames?${query.toString()}`);
 }
 
 export function assetUrl(path?: string | null): string {

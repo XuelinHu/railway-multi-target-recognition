@@ -2,8 +2,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.api.auth import require_user
 from app.core.dependencies import get_store, get_vision_service
-from app.models.schemas import AiInferRequest, ApiResponse, ImageTaskResult
+from app.models.schemas import AiInferRequest, ApiResponse, AuthUser, ImageTaskResult
 from app.repositories.postgres_store import PostgresStore
 from app.services.vision_service import VisionService
 
@@ -16,13 +17,19 @@ def infer_image_task(
     request: AiInferRequest,
     store: PostgresStore = Depends(get_store),
     service: VisionService = Depends(get_vision_service),
+    current_user: AuthUser = Depends(require_user),
 ) -> ApiResponse:
-    image = store.get_image_asset(request.image_id)
+    if current_user.role == "reviewer":
+        raise HTTPException(status_code=403, detail="审核员不能执行模型或修改任务结果")
+    image = store.get_accessible_image_asset(request.image_id, current_user.user_id)
     if image is None:
         raise HTTPException(status_code=404, detail="当前图片不存在")
 
     session_id = request.session_id or image.session_id or "default"
-    task = store.create_or_get_image_task(request.image_id, request.task_type, session_id)
+    task = store.create_or_get_image_task(request.image_id, request.task_type, session_id, current_user.user_id)
+    existing_result = store.get_image_task_result_by_task_id(task.task_id)
+    if existing_result is not None and existing_result.review_status == "approved":
+        raise HTTPException(status_code=409, detail="审核通过的任务已经锁定，不能重新执行模型")
     store.update_image_task_status(task.task_id, "processing")
 
     try:

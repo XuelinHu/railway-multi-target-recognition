@@ -13,6 +13,8 @@ ReviewStatus = Literal["pending_review", "in_review", "approved", "rejected"]
 ImageTaskType = Literal["detection", "segmentation", "pose", "classification", "caption"]
 ImageTaskStatus = Literal["idle", "pending", "processing", "success", "failed"]
 ResultSource = Literal["ai", "manual", "edited"]
+ImageReviewStatus = Literal["draft", "pending_review", "approved", "rejected"]
+VideoCaptionStatus = Literal["pending", "processing", "success", "failed"]
 
 
 def new_id(prefix: str) -> str:
@@ -159,6 +161,12 @@ class ImageTaskResult(BaseModel):
     model_id: str = ""
     latest_version_id: str | None = None
     latest_version_no: int | None = None
+    review_status: ImageReviewStatus = "draft"
+    submitted_by: str | None = None
+    submitted_at: datetime | None = None
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+    review_comment: str = ""
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
 
@@ -202,6 +210,40 @@ class ImageTaskAnnotationUpdateRequest(BaseModel):
     image_id: str = Field(alias="imageId")
     task_type: ImageTaskType = Field(alias="taskType")
     annotation_json: dict[str, Any] = Field(alias="annotationJson")
+
+
+class ImageTaskReviewRequest(BaseModel):
+    status: Literal["approved", "rejected"]
+    comment: str = Field(default="", max_length=1000)
+
+
+class AuthUser(BaseModel):
+    user_id: str = Field(default_factory=lambda: new_id("user"), alias="userId")
+    username: str
+    display_name: str = Field(alias="displayName")
+    role: str = "student"
+    is_active: bool = Field(default=True, alias="isActive")
+    created_at: datetime = Field(default_factory=now_utc, alias="createdAt")
+    updated_at: datetime = Field(default_factory=now_utc, alias="updatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AuthRegisterRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    username: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.-]+$")
+    display_name: str = Field(min_length=1, max_length=80, alias="displayName")
+    password: str = Field(min_length=6, max_length=128)
+
+
+class AuthLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=50)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class AuthUserRoleUpdateRequest(BaseModel):
+    role: Literal["student", "reviewer", "admin"]
 
 
 class AiInferRequest(BaseModel):
@@ -249,3 +291,57 @@ class ApiResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     detail: str
+
+
+class VideoCaptionBatch(BaseModel):
+    batch_id: str = Field(default_factory=lambda: new_id("vcbatch"))
+    name: str = Field(min_length=1, max_length=160)
+    source_dir: str = ""
+    output_dir: str = ""
+    model_id: str = "deepseek-ai/deepseek-vl2-tiny"
+    prompt: str = ""
+    frame_interval_seconds: float = Field(default=1.0, gt=0)
+    status: VideoCaptionStatus = "pending"
+    total_videos: int = Field(default=0, ge=0)
+    total_frames: int = Field(default=0, ge=0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
+class VideoCaptionVideo(BaseModel):
+    video_id: str = Field(default_factory=lambda: new_id("vcvideo"))
+    batch_id: str
+    filename: str
+    display_name: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    source_path: str
+    frame_dir: str = ""
+    fps: float | None = Field(default=None, gt=0)
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
+    frame_count: int | None = Field(default=None, ge=1)
+    duration_ms: int | None = Field(default=None, ge=0)
+    status: VideoCaptionStatus = "pending"
+    error: str = ""
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
+class VideoCaptionFrame(BaseModel):
+    frame_id: str = Field(default_factory=lambda: new_id("vcframe"))
+    batch_id: str
+    video_id: str
+    frame_index: int = Field(ge=0)
+    timestamp_ms: int = Field(ge=0)
+    image_path: str
+    image_url: str = ""
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
+    description_text: str = ""
+    model_id: str = "deepseek-ai/deepseek-vl2-tiny"
+    status: VideoCaptionStatus = "pending"
+    error: str = ""
+    result_json: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)

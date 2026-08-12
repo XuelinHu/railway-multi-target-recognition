@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.api.auth import require_admin
 from app.core.dependencies import get_store
-from app.models.schemas import ApiResponse, LabelConfigCreateRequest, LabelConfigUpdateRequest
+from app.models.schemas import ApiResponse, AuthUser, LabelConfigCreateRequest, LabelConfigUpdateRequest
 from app.repositories.postgres_store import PostgresStore
 
 
@@ -15,7 +16,7 @@ def list_labels(store: PostgresStore = Depends(get_store)) -> ApiResponse:
 
 
 @router.post("")
-def create_label(request: LabelConfigCreateRequest, store: PostgresStore = Depends(get_store)) -> ApiResponse:
+def create_label(request: LabelConfigCreateRequest, store: PostgresStore = Depends(get_store), _: AuthUser = Depends(require_admin)) -> ApiResponse:
     try:
         label = store.create_label_config(
             english_name=request.english_name,
@@ -29,7 +30,7 @@ def create_label(request: LabelConfigCreateRequest, store: PostgresStore = Depen
 
 
 @router.post("/{label_id}/copy")
-def copy_label(label_id: int, store: PostgresStore = Depends(get_store)) -> ApiResponse:
+def copy_label(label_id: int, store: PostgresStore = Depends(get_store), _: AuthUser = Depends(require_admin)) -> ApiResponse:
     label = store.copy_label_config(label_id)
     if label is None:
         raise HTTPException(status_code=404, detail="标签不存在")
@@ -41,6 +42,7 @@ def update_label(
     label_id: int,
     request: LabelConfigUpdateRequest,
     store: PostgresStore = Depends(get_store),
+    _: AuthUser = Depends(require_admin),
 ) -> ApiResponse:
     try:
         label = store.update_label_config(
@@ -57,7 +59,7 @@ def update_label(
 
 
 @router.delete("/{label_id}")
-def delete_label(label_id: int, store: PostgresStore = Depends(get_store)) -> ApiResponse:
+def delete_label(label_id: int, store: PostgresStore = Depends(get_store), _: AuthUser = Depends(require_admin)) -> ApiResponse:
     deleted = store.delete_label_config(label_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="标签不存在")

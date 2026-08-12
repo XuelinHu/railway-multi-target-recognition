@@ -7,7 +7,8 @@ from PIL import Image
 
 from app.core.config import Settings, get_settings
 from app.core.dependencies import get_store
-from app.models.schemas import ApiResponse, ImageAsset, ImageHistoryResponse, ImageTaskType, now_utc
+from app.api.auth import require_user
+from app.models.schemas import ApiResponse, AuthUser, ImageAsset, ImageHistoryResponse, ImageTaskType, now_utc
 from app.repositories.postgres_store import PostgresStore
 
 
@@ -24,6 +25,7 @@ def upload_image(
     session_id: str = Form(default="default", alias="sessionId"),
     settings: Settings = Depends(get_settings),
     store: PostgresStore = Depends(get_store),
+    current_user: AuthUser = Depends(require_user),
 ) -> ApiResponse:
     del task_type
     original_name = Path(file.filename or "upload.png").name
@@ -63,6 +65,7 @@ def upload_image(
         file_size=file_size,
         width=width,
         height=height,
+        user_id=current_user.user_id,
         session_id=session_id or "default",
     )
     store.create_image_asset(image_asset)
@@ -74,10 +77,17 @@ def list_images(
     task_type: ImageTaskType | None = Query(default=None, alias="taskType"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200, alias="pageSize"),
-    session_id: str = Query(default="default", alias="sessionId"),
+    session_id: str | None = Query(default=None, alias="sessionId"),
     store: PostgresStore = Depends(get_store),
+    current_user: AuthUser = Depends(require_user),
 ) -> ApiResponse:
-    records, total = store.list_image_assets(task_type, session_id or "default", page, page_size)
+    records, total = store.list_image_assets(
+        task_type=task_type,
+        session_id=session_id,
+        user_id=None if current_user.role in {"reviewer", "admin"} else current_user.user_id,
+        page=page,
+        page_size=page_size,
+    )
     data = ImageHistoryResponse(records=records, total=total)
     return ApiResponse(data={"records": [_image_payload(record) for record in data.records], "total": data.total})
 
