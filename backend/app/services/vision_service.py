@@ -1,3 +1,4 @@
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
@@ -251,13 +252,11 @@ class VisionService:
         return tokenizer.decode(outputs[0].detach().cpu().tolist(), skip_special_tokens=True).strip()
 
     def _patch_xformers_attention(self) -> None:
-        try:
-            import torch
-            import xformers.ops as xformers_ops
-        except Exception as exc:
-            raise RuntimeError("当前 Python 环境缺少 xformers，无法执行 deepseek-vl2-tiny 视觉注意力") from exc
+        import torch
 
-        if getattr(xformers_ops.memory_efficient_attention, "_railway_torch_fallback", False):
+        xformers_ops = self._xformers_ops()
+        existing = getattr(xformers_ops, "memory_efficient_attention", None)
+        if existing is not None and getattr(existing, "_railway_torch_fallback", False):
             return
 
         def torch_attention(
@@ -286,6 +285,31 @@ class VisionService:
         torch_attention._railway_torch_fallback = True  # type: ignore[attr-defined]
         xformers_ops.memory_efficient_attention = torch_attention
 
+    def _xformers_ops(self) -> Any:
+        """Return the ``xformers.ops`` module, standing in a stub when xformers is absent.
+
+        deepseek-vl2 imports ``memory_efficient_attention`` lazily inside its attention
+        forward pass, and :meth:`_patch_xformers_attention` replaces that function with a
+        PyTorch SDPA implementation either way, so the compiled xformers kernels never run.
+        xformers wheels lag behind recent torch releases, so falling back to a stub keeps
+        the model usable without pinning the whole environment to an older torch.
+        """
+        try:
+            import xformers.ops as xformers_ops
+
+            return xformers_ops
+        except Exception:
+            pass
+
+        import types
+
+        xformers_module = sys.modules.get("xformers") or types.ModuleType("xformers")
+        xformers_ops = types.ModuleType("xformers.ops")
+        xformers_module.ops = xformers_ops  # type: ignore[attr-defined]
+        sys.modules["xformers"] = xformers_module
+        sys.modules["xformers.ops"] = xformers_ops
+        return xformers_ops
+
     def _load_deepseek_vl2_model(self) -> tuple[Any, Any, Any]:
         if (
             self._deepseek_vl2_model is not None
@@ -302,12 +326,21 @@ class VisionService:
 
         model_path = self._deepseek_vl2_model_path()
         processor = DeepseekVLV2Processor.from_pretrained(model_path)
-        model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
+
+        device = None
         if torch.cuda.is_available() and self._device() is not None:
             device = f"cuda:{self._device()}" if self._device().isdigit() else self._device()
-            model = model.to(torch.bfloat16).to(device)
-        else:
-            model = model.to(torch.float32)
+        # Load straight into bf16 on the target device: materialising a float32 copy
+        # first doubles peak host RAM, and this box is tight while other services run.
+        dtype = torch.bfloat16 if device is not None else torch.float32
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
+        )
+        if device is not None:
+            model = model.to(device)
         model = model.eval()
         self._deepseek_vl2_processor = processor
         self._deepseek_vl2_tokenizer = processor.tokenizer
@@ -328,6 +361,30 @@ class VisionService:
         if feature == "detection" and self.settings.model_path:
             return self.settings.model_path
         return DEFAULT_MODELS[feature]
+
+    def unload_models(self) -> None:
+        """Drop every cached model and release its VRAM.
+
+        Batch scripts call this when they finish so the GPU is free for the next
+        stage (frame captioning and translation cannot share the 24GB card).
+        """
+        self._yolo_models.clear()
+        self._caption_model = None
+        self._caption_processor = None
+        self._deepseek_vl2_model = None
+        self._deepseek_vl2_processor = None
+        self._deepseek_vl2_tokenizer = None
+
+        import gc
+
+        gc.collect()
+        try:
+            import torch
+        except Exception:
+            return
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
 
     def _device(self) -> str | None:
         return self.settings.device or None

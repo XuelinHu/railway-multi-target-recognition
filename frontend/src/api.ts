@@ -131,6 +131,7 @@ export type VideoCaptionFrame = {
   width?: number | null;
   height?: number | null;
   descriptionText: string;
+  descriptionEn: string;
   modelId: string;
   status: "pending" | "processing" | "success" | "failed";
   error: string;
@@ -435,4 +436,106 @@ export function assetUrl(path?: string | null): string {
   if (!path) return "";
   if (/^https?:\/\//.test(path)) return path;
   return `${API_BASE_URL}${path}`;
+}
+
+export type ChatRole = "system" | "user" | "assistant";
+export type ChatMessage = { role: ChatRole; content: string };
+export type ChatModelInfo = { name: string; size: number };
+export type ChatLanguage = "zh" | "en";
+
+export function listChatModels(): Promise<{ models: ChatModelInfo[]; defaultModel: string }> {
+  return apiData<{ models: ChatModelInfo[]; defaultModel: string }>("/api/chat/models");
+}
+
+export async function streamChatCompletion(
+  body: { messages: ChatMessage[]; model?: string; lang: ChatLanguage },
+  handlers: {
+    onDelta: (text: string) => void;
+    onDone: (reason: string) => void;
+    onError: (detail: string) => void;
+  },
+  signal: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/chat`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok || !response.body) {
+    let detail = response.statusText || `HTTP ${response.status}`;
+    try {
+      const payload = await response.json();
+      if (typeof payload.detail === "string") detail = payload.detail;
+    } catch {
+      /* keep the status text */
+    }
+    throw new ApiRequestError(detail, response.status);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      // stream:true keeps multi-byte CJK characters intact across chunk boundaries
+      buffer += decoder.decode(value, { stream: true });
+      let separator = buffer.indexOf("\n\n");
+      while (separator >= 0) {
+        const rawEvent = buffer.slice(0, separator);
+        buffer = buffer.slice(separator + 2);
+        dispatchChatEvent(rawEvent, handlers);
+        separator = buffer.indexOf("\n\n");
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) dispatchChatEvent(buffer, handlers);
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function dispatchChatEvent(
+  rawEvent: string,
+  handlers: { onDelta: (text: string) => void; onDone: (reason: string) => void; onError: (detail: string) => void },
+): void {
+  let eventName = "message";
+  let dataLine = "";
+  for (const line of rawEvent.split("\n")) {
+    if (line.startsWith("event: ")) eventName = line.slice(7).trim();
+    else if (line.startsWith("data: ")) dataLine = line.slice(6);
+  }
+  if (!dataLine) return;
+  let payload: { content?: string; doneReason?: string; detail?: string };
+  try {
+    payload = JSON.parse(dataLine);
+  } catch {
+    return;
+  }
+  if (eventName === "delta") handlers.onDelta(payload.content ?? "");
+  else if (eventName === "done") handlers.onDone(payload.doneReason ?? "stop");
+  else if (eventName === "error") handlers.onError(payload.detail ?? "对话失败");
+}
+
+export async function fetchSpeech(text: string, lang: ChatLanguage): Promise<Blob> {
+  const response = await fetch(`${API_BASE_URL}/api/chat/tts`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, lang }),
+  });
+  if (!response.ok) {
+    let detail = response.statusText || `HTTP ${response.status}`;
+    try {
+      const payload = await response.json();
+      if (typeof payload.detail === "string") detail = payload.detail;
+    } catch {
+      /* keep the status text */
+    }
+    throw new ApiRequestError(detail, response.status);
+  }
+  return response.blob();
 }

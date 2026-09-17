@@ -115,6 +115,7 @@ def _frame_payload(frame: VideoCaptionFrame) -> dict:
         "width": frame.width,
         "height": frame.height,
         "descriptionText": frame.description_text,
+        "descriptionEn": frame.description_en,
         "modelId": frame.model_id,
         "status": frame.status,
         "error": frame.error,

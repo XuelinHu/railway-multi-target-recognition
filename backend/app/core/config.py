@@ -18,12 +18,30 @@ class Settings(BaseSettings):
     task_worker_enabled: bool = True
     task_poll_interval_seconds: float = Field(default=1.0, gt=0)
     cors_origins: str = "http://localhost:4021,http://127.0.0.1:4021"
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_default_model: str = "qwen3:14b"
+    ollama_timeout_seconds: float = Field(default=15.0, gt=0)
+    chat_system_prompt_zh: str = (
+        "你是铁路巡检领域的智能助手，熟悉接触网、轨道、道岔、施工安全与设备运维。"
+        "请用中文回答，回答简洁、专业、可执行。"
+    )
+    chat_system_prompt_en: str = (
+        "You are an intelligent assistant for railway inspection, familiar with catenary, track, "
+        "turnouts, construction safety and equipment maintenance. Answer in English, concisely and professionally."
+    )
+    tts_voice_zh: str = "zh_CN-huayan-medium"
+    tts_voice_en: str = "en_US-lessac-medium"
+    tts_voices_dir: Path = Path("./models/piper-voices")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     @property
     def upload_dir(self) -> Path:
         return self.data_dir / "uploads"
+
+    @property
+    def tts_cache_dir(self) -> Path:
+        return self.data_dir / "tts_cache"
 
     @property
     def allowed_origins(self) -> list[str]:
@@ -35,4 +53,5 @@ def get_settings() -> Settings:
     settings = Settings()
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    settings.tts_cache_dir.mkdir(parents=True, exist_ok=True)
     return settings

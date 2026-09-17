@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import ai, annotations, assets, auth, export, image_tasks, images, labels, tasks, video_captions, vision
+from app.api import ai, annotations, assets, auth, chat, export, image_tasks, images, labels, tasks, video_captions, vision
 from app.core.config import get_settings
 from app.core.dependencies import get_store, get_task_service
 from app.services.task_worker import DatabaseTaskWorker
@@ -63,6 +63,7 @@ def create_app() -> FastAPI:
     app.include_router(ai.router)
     app.include_router(labels.router)
     app.include_router(video_captions.router)
+    app.include_router(chat.router)
     app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
 
     @app.get("/health")

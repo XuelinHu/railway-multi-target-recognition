@@ -28,10 +28,13 @@ import {
   Trash2,
   Upload,
   UserRound,
+  MessageSquare,
   Volume2,
   Waypoints,
   ZoomIn,
+  ZoomOut,
 } from "@lucide/vue";
+import ChatPage from "./components/ChatPage.vue";
 import LiveGesturePage from "./components/LiveGesturePage.vue";
 import {
   ApiRequestError,
@@ -75,7 +78,7 @@ import {
   uploadImage,
 } from "./api";
 
-type PageMode = "workspace" | "videoCaptions" | "liveGesture" | "settings";
+type PageMode = "workspace" | "videoCaptions" | "chat" | "liveGesture" | "settings";
 type AnnotationTool = "select" | "pan" | "box" | "polygon" | "line";
 type ShapeType = "box" | "polygon" | "line";
 type ResizeSide = "history" | "thumbnail";
@@ -214,6 +217,13 @@ const selectedVideoCaptionVideoId = ref("");
 const selectedVideoCaptionFrameId = ref("");
 const videoCaptionQuery = ref("");
 const videoCaptionTotal = ref(0);
+const activeCaptionLang = ref<"zh" | "en">("zh");
+const framePreviewEl = ref<HTMLElement | null>(null);
+const lightboxStageEl = ref<HTMLElement | null>(null);
+const frameZoomTarget = computed(() => (lightboxFrameId.value ? lightboxStageEl.value : framePreviewEl.value));
+const frameView = reactive({ zoom: 1, x: 0, y: 0, dragging: false, startX: 0, startY: 0, originX: 0, originY: 0 });
+const lightboxFrameId = ref("");
+watch(selectedVideoCaptionFrameId, () => resetFrameView());
 
 const defaultSessionId = "default";
 const taskStates = reactive<Record<ImageTaskType, TaskState>>({
@@ -706,6 +716,112 @@ function selectVideoCaptionFrame(frameId: string) {
   selectedVideoCaptionFrameId.value = frameId;
 }
 
+const FRAME_MIN_ZOOM = 1;
+const FRAME_MAX_ZOOM = 5;
+const lightboxFrame = computed(
+  () => videoCaptionFrames.value.find((frame) => frame.frameId === lightboxFrameId.value) ?? null,
+);
+
+function resetFrameView() {
+  frameView.zoom = 1;
+  frameView.x = 0;
+  frameView.y = 0;
+}
+
+function applyFrameZoom(target: number, anchorX: number, anchorY: number) {
+  const next = Math.min(FRAME_MAX_ZOOM, Math.max(FRAME_MIN_ZOOM, Number(target.toFixed(3))));
+  if (next === frameView.zoom) return;
+  const scale = next / frameView.zoom;
+  if (next === FRAME_MIN_ZOOM) {
+    frameView.zoom = next;
+    frameView.x = 0;
+    frameView.y = 0;
+    return;
+  }
+  frameView.x = anchorX - scale * (anchorX - frameView.x);
+  frameView.y = anchorY - scale * (anchorY - frameView.y);
+  frameView.zoom = next;
+}
+
+function zoomFrameAtCenter(factor: number, container: HTMLElement | null) {
+  const rect = container?.getBoundingClientRect();
+  applyFrameZoom(frameView.zoom * factor, (rect?.width ?? 0) / 2, (rect?.height ?? 0) / 2);
+}
+
+function onFrameWheel(event: WheelEvent) {
+  if (!selectedVideoCaptionFrame.value) return;
+  event.preventDefault();
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  applyFrameZoom(
+    frameView.zoom * (event.deltaY > 0 ? 1 / 1.15 : 1.15),
+    event.clientX - rect.left,
+    event.clientY - rect.top,
+  );
+}
+
+function onFramePointerDown(event: PointerEvent) {
+  if (frameView.zoom <= FRAME_MIN_ZOOM) return;
+  frameView.dragging = true;
+  frameView.startX = event.clientX;
+  frameView.startY = event.clientY;
+  frameView.originX = frameView.x;
+  frameView.originY = frameView.y;
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+function onFramePointerMove(event: PointerEvent) {
+  if (!frameView.dragging) return;
+  frameView.x = frameView.originX + event.clientX - frameView.startX;
+  frameView.y = frameView.originY + event.clientY - frameView.startY;
+}
+
+function stopFrameDrag() {
+  frameView.dragging = false;
+}
+
+function openFrameLightbox(frame: VideoCaptionFrame) {
+  lightboxFrameId.value = frame.frameId;
+  selectVideoCaptionFrame(frame.frameId);
+  resetFrameView();
+}
+
+function closeFrameLightbox() {
+  lightboxFrameId.value = "";
+  resetFrameView();
+}
+
+function stepLightbox(delta: number) {
+  const index = videoCaptionFrames.value.findIndex((frame) => frame.frameId === lightboxFrameId.value);
+  const next = index < 0 ? null : videoCaptionFrames.value[index + delta];
+  if (!next) return;
+  lightboxFrameId.value = next.frameId;
+  selectVideoCaptionFrame(next.frameId);
+  resetFrameView();
+}
+
+function handleVideoCaptionKeydown(event: KeyboardEvent) {
+  if (!lightboxFrameId.value) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeFrameLightbox();
+    return;
+  }
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    event.preventDefault();
+    stepLightbox(event.key === "ArrowLeft" ? -1 : 1);
+    return;
+  }
+  if (event.key === "+" || event.key === "=") {
+    event.preventDefault();
+    zoomFrameAtCenter(1.15, frameZoomTarget.value);
+    return;
+  }
+  if (event.key === "-" || event.key === "_") {
+    event.preventDefault();
+    zoomFrameAtCenter(1 / 1.15, frameZoomTarget.value);
+  }
+}
+
 async function submitLabel() {
   await runBusy(async () => {
     await createLabel({
@@ -964,6 +1080,10 @@ function shortcutLabel(event: KeyboardEvent) {
 function handleGlobalKeydown(event: KeyboardEvent) {
   const target = event.target as HTMLElement | null;
   if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
+  if (currentPage.value === "videoCaptions") {
+    handleVideoCaptionKeydown(event);
+    return;
+  }
   if (currentPage.value !== "workspace") return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
@@ -1380,6 +1500,7 @@ function reviewStatusText(status: ImageReviewStatus) {
         <nav class="task-tabs" aria-label="工作区">
           <button :class="{ active: currentPage === 'workspace' }" @click="setPage('workspace')"><Boxes :size="16" />标注工作台</button>
           <button :class="{ active: currentPage === 'videoCaptions' }" @click="setPage('videoCaptions')"><Film :size="16" />视频解帧</button>
+          <button :class="{ active: currentPage === 'chat' }" @click="setPage('chat')"><MessageSquare :size="16" />智能对话</button>
           <button :class="{ active: currentPage === 'liveGesture' }" @click="setPage('liveGesture')"><Camera :size="16" />实时手势</button>
           <button :class="{ active: currentPage === 'settings' }" @click="setPage('settings')"><Settings :size="16" />系统配置</button>
         </nav>
@@ -1800,6 +1921,16 @@ function reviewStatusText(status: ImageReviewStatus) {
           >
             <img :src="assetUrl(frame.imageUrl)" alt="" />
             <span>{{ formatTimestamp(frame.timestampMs) }}</span>
+            <span
+              class="frame-expand"
+              role="button"
+              tabindex="0"
+              title="全屏查看"
+              @click.stop="openFrameLightbox(frame)"
+              @keydown.enter.stop="openFrameLightbox(frame)"
+            >
+              <Maximize2 :size="13" />
+            </span>
           </button>
           <div v-if="videoCaptionFrames.length === 0" class="empty-state">暂无匹配帧</div>
         </div>
@@ -1807,8 +1938,29 @@ function reviewStatusText(status: ImageReviewStatus) {
 
       <aside class="frame-detail-panel">
         <template v-if="selectedVideoCaptionFrame">
-          <div class="frame-preview">
-            <img :src="assetUrl(selectedVideoCaptionFrame.imageUrl)" alt="视频帧" />
+          <div class="frame-zoom-bar">
+            <button title="放大" @click="zoomFrameAtCenter(1.15, framePreviewEl)"><ZoomIn :size="15" /></button>
+            <button title="缩小" @click="zoomFrameAtCenter(1 / 1.15, framePreviewEl)"><ZoomOut :size="15" /></button>
+            <button title="重置" @click="resetFrameView"><RotateCcw :size="15" /></button>
+            <span>{{ Math.round(frameView.zoom * 100) }}%</span>
+            <button title="全屏查看" @click="openFrameLightbox(selectedVideoCaptionFrame)"><Maximize2 :size="15" /></button>
+          </div>
+          <div
+            ref="framePreviewEl"
+            class="frame-preview"
+            :class="{ 'is-zoomed': frameView.zoom > 1 }"
+            @wheel="onFrameWheel"
+            @pointerdown="onFramePointerDown"
+            @pointermove="onFramePointerMove"
+            @pointerup="stopFrameDrag"
+            @pointercancel="stopFrameDrag"
+            @dblclick="openFrameLightbox(selectedVideoCaptionFrame)"
+          >
+            <img
+              :src="assetUrl(selectedVideoCaptionFrame.imageUrl)"
+              alt="视频帧"
+              :style="{ transform: `translate(${frameView.x}px, ${frameView.y}px) scale(${frameView.zoom})` }"
+            />
           </div>
           <dl class="image-info">
             <dt>时间</dt>
@@ -1821,13 +1973,26 @@ function reviewStatusText(status: ImageReviewStatus) {
             <dd>{{ selectedVideoCaptionFrame.status }}</dd>
           </dl>
           <section class="result-summary">
-            <h2>DeepSeek 描述</h2>
-            <p class="caption-text">{{ selectedVideoCaptionFrame.descriptionText || selectedVideoCaptionFrame.error || "暂无描述" }}</p>
+            <div class="caption-head">
+              <h2>DeepSeek 描述</h2>
+              <div class="caption-lang-tabs">
+                <button :class="{ active: activeCaptionLang === 'zh' }" @click="activeCaptionLang = 'zh'">中文</button>
+                <button :class="{ active: activeCaptionLang === 'en' }" @click="activeCaptionLang = 'en'">EN</button>
+              </div>
+            </div>
+            <p v-if="activeCaptionLang === 'zh'" class="caption-text">
+              {{ selectedVideoCaptionFrame.descriptionText || selectedVideoCaptionFrame.error || "暂无描述" }}
+            </p>
+            <p v-else class="caption-text">
+              {{ selectedVideoCaptionFrame.descriptionEn || "暂无英文描述" }}
+            </p>
           </section>
         </template>
         <div v-else class="empty-state detail-empty">请选择一个视频帧</div>
       </aside>
     </section>
+
+    <ChatPage v-else-if="currentPage === 'chat'" :username="currentUser.username" />
 
     <LiveGesturePage v-else-if="currentPage === 'liveGesture'" />
 
@@ -1923,6 +2088,46 @@ function reviewStatusText(status: ImageReviewStatus) {
       <div class="original-modal" @click.stop>
         <img :src="assetUrl(originalPreview.imageUrl)" alt="原图预览" />
         <button @click="originalPreview = null">关闭</button>
+      </div>
+    </div>
+
+    <div v-if="lightboxFrame" class="lightbox-backdrop" @click.self="closeFrameLightbox">
+      <div class="lightbox-modal" role="dialog" aria-modal="true" aria-label="视频帧全屏查看">
+        <header class="lightbox-head">
+          <div>
+            <strong>{{ selectedVideoCaptionVideo?.displayName || selectedVideoCaptionVideo?.filename || "视频帧" }}</strong>
+            <span>{{ formatTimestamp(lightboxFrame.timestampMs) }} · 帧号 {{ lightboxFrame.frameIndex }}</span>
+          </div>
+          <div class="lightbox-actions">
+            <button title="上一帧" @click="stepLightbox(-1)"><ChevronLeft :size="16" /></button>
+            <button title="下一帧" @click="stepLightbox(1)"><ChevronRight :size="16" /></button>
+            <button title="放大" @click="zoomFrameAtCenter(1.15, lightboxStageEl)"><ZoomIn :size="16" /></button>
+            <button title="缩小" @click="zoomFrameAtCenter(1 / 1.15, lightboxStageEl)"><ZoomOut :size="16" /></button>
+            <button title="重置" @click="resetFrameView"><RotateCcw :size="16" /></button>
+            <span>{{ Math.round(frameView.zoom * 100) }}%</span>
+            <button title="关闭" @click="closeFrameLightbox">关闭</button>
+          </div>
+        </header>
+        <div
+          ref="lightboxStageEl"
+          class="lightbox-stage"
+          :class="{ 'is-zoomed': frameView.zoom > 1 }"
+          @wheel="onFrameWheel"
+          @pointerdown="onFramePointerDown"
+          @pointermove="onFramePointerMove"
+          @pointerup="stopFrameDrag"
+          @pointercancel="stopFrameDrag"
+        >
+          <img
+            :src="assetUrl(lightboxFrame.imageUrl)"
+            alt="视频帧"
+            :style="{ transform: `translate(${frameView.x}px, ${frameView.y}px) scale(${frameView.zoom})` }"
+          />
+        </div>
+        <footer class="lightbox-caption">
+          <p v-if="activeCaptionLang === 'zh'">{{ lightboxFrame.descriptionText || lightboxFrame.error || "暂无描述" }}</p>
+          <p v-else>{{ lightboxFrame.descriptionEn || "暂无英文描述" }}</p>
+        </footer>
       </div>
     </div>
   </main>

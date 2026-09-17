@@ -1,6 +1,8 @@
 import argparse
 import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -10,7 +12,7 @@ from app.core.dependencies import get_store, get_vision_service
 from app.models.schemas import VideoCaptionBatch, VideoCaptionFrame, VideoCaptionVideo, new_id, now_utc
 
 
-DEFAULT_SOURCE_DIR = Path("/ds2/videos/DJI_001/railway-multi-target-recognition")
+DEFAULT_SOURCE_DIR = Path("/ds2/videos/DJI_001")
 DEFAULT_MODEL_ID = "deepseek-ai/deepseek-vl2-tiny"
 DEFAULT_PROMPT = "请用中文描述画面，列出可见的铁路目标、人员、车辆、轨道、设备、施工场景或安全风险。"
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
@@ -26,12 +28,27 @@ def main() -> None:
     parser.add_argument("--limit-videos", type=int, default=None)
     parser.add_argument("--max-frames-per-video", type=int, default=None)
     parser.add_argument("--force", action="store_true", help="Re-caption frames that already have successful results.")
+    parser.add_argument("--min-free-mib", type=int, default=9000, help="Free VRAM required before captioning starts.")
+    parser.add_argument(
+        "--wait-for-vram",
+        action="store_true",
+        help="Block until --min-free-mib is available instead of exiting (for shared GPU hosts).",
+    )
     args = parser.parse_args()
 
     if args.frame_interval_seconds <= 0:
         raise SystemExit("--frame-interval-seconds must be greater than 0")
     if not args.source_dir.exists():
         raise SystemExit(f"source directory not found: {args.source_dir}")
+
+    free_mib = _free_vram_mib()
+    if free_mib is not None and free_mib < args.min_free_mib:
+        if not args.wait_for_vram:
+            raise SystemExit(
+                f"only {free_mib} MiB of VRAM free, need {args.min_free_mib} MiB. "
+                "Free the GPU (ollama stop <model>) or pass --wait-for-vram."
+            )
+        _wait_for_vram(args.min_free_mib)
 
     settings = get_settings()
     store = get_store()
@@ -60,21 +77,27 @@ def main() -> None:
         video_paths = video_paths[: args.limit_videos]
 
     print(f"Batch {batch.name}: {len(video_paths)} video(s), interval={args.frame_interval_seconds}s", flush=True)
-    for position, video_path in enumerate(video_paths, start=1):
-        print(f"[{position}/{len(video_paths)}] {video_path.name}", flush=True)
-        _process_video(
-            video_path=video_path,
-            batch=batch,
-            output_dir=output_dir,
-            frame_interval_seconds=args.frame_interval_seconds,
-            model_id=args.model_id,
-            store=store,
-            service=service,
-            max_frames=args.max_frames_per_video,
-            force=args.force,
-        )
-
-    store.update_video_caption_batch_counts(batch.batch_id, status="success")
+    try:
+        for position, video_path in enumerate(video_paths, start=1):
+            print(f"[{position}/{len(video_paths)}] {video_path.name}", flush=True)
+            _process_video(
+                video_path=video_path,
+                batch=batch,
+                output_dir=output_dir,
+                frame_interval_seconds=args.frame_interval_seconds,
+                model_id=args.model_id,
+                store=store,
+                service=service,
+                max_frames=args.max_frames_per_video,
+                force=args.force,
+                min_free_mib=args.min_free_mib,
+            )
+        store.update_video_caption_batch_counts(batch.batch_id, status="success")
+        print(f"Batch {batch.name} finished", flush=True)
+    finally:
+        # Release VL2 VRAM: the translation stage needs the card for ollama.
+        service.unload_models()
+        print("Vision models unloaded", flush=True)
 
 
 def _process_video(
@@ -87,6 +110,7 @@ def _process_video(
     service,
     max_frames: int | None,
     force: bool,
+    min_free_mib: int,
 ) -> None:
     try:
         import cv2
@@ -168,7 +192,7 @@ def _process_video(
             record.image_url = f"/api/video-captions/frames/{record.frame_id}/image"
 
             try:
-                description = service._deepseek_vl2_caption(image_path)
+                description = _caption_with_retry(service, image_path, min_free_mib)
                 record.description_text = description
                 record.status = "success"
                 succeeded += 1
@@ -212,6 +236,52 @@ def _process_video(
         )
     )
     store.update_video_caption_batch_counts(batch.batch_id, status="processing")
+
+
+def _caption_with_retry(service, image_path: Path, min_free_mib: int, attempts: int = 3) -> str:
+    """Caption one frame, reclaiming VRAM and retrying if the GPU was taken mid-run.
+
+    This box is shared with other GPU services, so a frame can hit an allocation
+    failure even though the run started with enough free memory.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return service._deepseek_vl2_caption(image_path)
+        except Exception as exc:
+            if attempt == attempts or "out of memory" not in str(exc).lower():
+                raise
+            print(f"    CUDA OOM (attempt {attempt}/{attempts}); dropping models and waiting for VRAM", flush=True)
+            service.unload_models()
+            _wait_for_vram(min_free_mib)
+    raise RuntimeError("unreachable")
+
+
+def _free_vram_mib() -> int | None:
+    try:
+        output = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        ).stdout
+    except Exception:
+        return None
+    first = output.strip().splitlines()[0].strip() if output.strip() else ""
+    return int(first) if first.isdigit() else None
+
+
+def _wait_for_vram(min_free_mib: int, poll_seconds: int = 30) -> None:
+    while True:
+        free_mib = _free_vram_mib()
+        if free_mib is None:
+            print("  nvidia-smi unavailable; assuming the GPU is usable", flush=True)
+            return
+        if free_mib >= min_free_mib:
+            print(f"  {free_mib} MiB free VRAM, resuming", flush=True)
+            return
+        print(f"  waiting for VRAM: {free_mib} MiB free, need {min_free_mib} MiB", flush=True)
+        time.sleep(poll_seconds)
 
 
 def _unknown_frame_indexes(capture, step: int):

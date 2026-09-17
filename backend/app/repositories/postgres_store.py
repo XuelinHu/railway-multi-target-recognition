@@ -222,6 +222,7 @@ class VideoCaptionFrameRecord(Base):
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     description_text: Mapped[str] = mapped_column(Text, default="")
+    description_en: Mapped[str] = mapped_column(Text, default="")
     model_id: Mapped[str] = mapped_column(String(160), default="")
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     error: Mapped[str] = mapped_column(Text, default="")
@@ -880,6 +881,9 @@ class PostgresStore:
                 record.width = frame.width
                 record.height = frame.height
                 record.description_text = frame.description_text
+                if frame.description_en:
+                    # 解帧脚本重跑时不带译文，避免覆盖已有英文描述
+                    record.description_en = frame.description_en
                 record.model_id = frame.model_id
                 record.status = frame.status
                 record.error = frame.error
@@ -888,6 +892,32 @@ class PostgresStore:
                 frame.frame_id = record.id
             session.flush()
             return self._video_caption_frame_from_record(record)
+
+    def update_video_caption_frame_description_en(self, frame_id: str, description_en: str) -> bool:
+        with self.session_factory.begin() as session:
+            record = session.get(VideoCaptionFrameRecord, frame_id)
+            if record is None:
+                return False
+            record.description_en = description_en
+            record.updated_at = now_utc()
+            return True
+
+    def list_video_caption_frames_missing_english(self, video_id: str) -> list[VideoCaptionFrame]:
+        with self.session_factory() as session:
+            records = session.scalars(
+                select(VideoCaptionFrameRecord)
+                .where(
+                    VideoCaptionFrameRecord.video_id == video_id,
+                    VideoCaptionFrameRecord.status == "success",
+                    VideoCaptionFrameRecord.description_text != "",
+                    or_(
+                        VideoCaptionFrameRecord.description_en.is_(None),
+                        VideoCaptionFrameRecord.description_en == "",
+                    ),
+                )
+                .order_by(VideoCaptionFrameRecord.frame_index.asc())
+            ).all()
+            return [self._video_caption_frame_from_record(record) for record in records]
 
     def get_video_caption_frame(self, frame_id: str) -> VideoCaptionFrame | None:
         with self.session_factory() as session:
@@ -919,6 +949,7 @@ class PostgresStore:
                 pattern = f"%{query}%"
                 condition = or_(
                     VideoCaptionFrameRecord.description_text.ilike(pattern),
+                    VideoCaptionFrameRecord.description_en.ilike(pattern),
                     VideoCaptionFrameRecord.error.ilike(pattern),
                 )
                 statement = statement.where(condition)
@@ -949,6 +980,7 @@ class PostgresStore:
         with self.engine.begin() as connection:
             connection.execute(text("ALTER TABLE video_caption_video ADD COLUMN IF NOT EXISTS display_name VARCHAR(500) DEFAULT ''"))
             connection.execute(text("ALTER TABLE video_caption_video ADD COLUMN IF NOT EXISTS keywords_json JSON DEFAULT '[]'::json"))
+            connection.execute(text("ALTER TABLE video_caption_frame ADD COLUMN IF NOT EXISTS description_en TEXT DEFAULT ''"))
 
     def _ensure_image_task_review_schema(self, database_url: str) -> None:
         if not database_url.startswith("postgresql"):
@@ -1245,6 +1277,7 @@ class PostgresStore:
             width=frame.width,
             height=frame.height,
             description_text=frame.description_text,
+            description_en=frame.description_en,
             model_id=frame.model_id,
             status=frame.status,
             error=frame.error,
@@ -1265,6 +1298,7 @@ class PostgresStore:
             width=record.width,
             height=record.height,
             description_text=record.description_text,
+            description_en=record.description_en or "",
             model_id=record.model_id,
             status=record.status,
             error=record.error,

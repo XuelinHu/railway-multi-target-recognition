@@ -16,6 +16,8 @@ dependencies = [
     "transformers==4.38.2",
     "uvicorn[standard]>=0.32.0",
     "ultralytics>=8.4.70",
+    "piper-tts>=1.8.0",
+    "httpx>=0.28.1",
 ]
 
 [dependency-groups]

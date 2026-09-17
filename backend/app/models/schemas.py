@@ -293,6 +293,23 @@ class ErrorResponse(BaseModel):
     detail: str
 
 
+class ChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str = Field(min_length=1, max_length=8000)
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage] = Field(min_length=1, max_length=40)
+    model: str | None = None
+    lang: Literal["zh", "en"] = "zh"
+    temperature: float | None = Field(default=None, ge=0, le=2)
+
+
+class TtsRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+    lang: Literal["zh", "en"] | None = None
+
+
 class VideoCaptionBatch(BaseModel):
     batch_id: str = Field(default_factory=lambda: new_id("vcbatch"))
     name: str = Field(min_length=1, max_length=160)
@@ -339,6 +356,7 @@ class VideoCaptionFrame(BaseModel):
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
     description_text: str = ""
+    description_en: str = ""
     model_id: str = "deepseek-ai/deepseek-vl2-tiny"
     status: VideoCaptionStatus = "pending"
     error: str = ""
