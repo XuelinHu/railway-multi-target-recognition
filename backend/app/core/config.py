@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     run_tasks_inline: bool = False
     task_worker_enabled: bool = True
     task_poll_interval_seconds: float = Field(default=1.0, gt=0)
-    cors_origins: str = "http://localhost:4004,http://127.0.0.1:4004"
+    cors_origins: str = "http://localhost:4021,http://127.0.0.1:4021"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

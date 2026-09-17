@@ -15,11 +15,11 @@
 ## Network And Startup
 
 - This project uses FastAPI for the backend and Vue + Vite for the frontend.
-- Assigned backend port for this project: `8010` (public FRP port `18010`).
-- FRP backend public mapping: `47.120.48.245:18000-18010 -> 127.0.0.1:8000-8010`.
-- FRP frontend public mapping: `47.120.48.245:14000-14010 -> 127.0.0.1:4000-4010`.
-- Assigned frontend port for this project: `4004` (public FRP port `14004`).
-- When exposing the frontend through FRP, prefer an unused local frontend port in `4000-4010` rather than Vite's default `5173`.
+- Assigned backend port for this project: `8023` (public FRP port `18023`).
+- FRP backend public mapping: `47.120.48.245:18020-18036 -> 127.0.0.1:8020-8036`.
+- FRP frontend public mapping: `47.120.48.245:14020-14032 -> 127.0.0.1:4020-4032`.
+- Assigned frontend port for this project: `4021` (public FRP port `14021`).
+- When exposing the frontend through FRP, prefer an unused local frontend port in `4020-4032` rather than Vite's default `5173`.
 - When starting the frontend for FRP access, set `VITE_API_BASE_URL` to the backend address that the browser can reach.
 
 ## GitHub Commit Language

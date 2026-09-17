@@ -80,7 +80,7 @@ scripts/
 cd backend
 uv sync --dev
 cp .env.example .env
-uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8010
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8023
 ```
 
 前端：
@@ -94,30 +94,30 @@ npm run dev
 默认访问：
 
 ```text
-Frontend: http://localhost:4004
-Backend:  http://localhost:8010
-API Docs: http://localhost:8010/docs
+Frontend: http://localhost:4021
+Backend:  http://localhost:8023
+API Docs: http://localhost:8023/docs
 ```
 
 FRP 映射时保持内网端口不变：
 
-按 `frp` skill 的端口范围，前端使用本机 `4000-4010`，后端使用本机 `8000-8010`。本项目使用本地前端 `4004`、本地后端 `8010`：
+按 `frp` skill 的端口范围，前端使用本机 `4020-4032`，后端使用本机 `8020-8036`。本项目使用本地前端 `4021`（公网 `14021`）、本地后端 `8023`（公网 `18023`）：
 
 ```bash
-VITE_API_BASE_URL=http://47.120.48.245:18010 npm run dev -- --host 0.0.0.0 --port 4004
+VITE_API_BASE_URL=http://47.120.48.245:18023 npm run dev -- --host 0.0.0.0 --port 4021
 ```
 
 对应外网地址：
 
 ```text
-Frontend: http://47.120.48.245:14004
-Backend:  http://47.120.48.245:18010
+Frontend: http://47.120.48.245:14021
+Backend:  http://47.120.48.245:18023
 ```
 
 后端跨域放行前端地址：
 
 ```bash
-CORS_ORIGINS=http://localhost:4004,http://127.0.0.1:4004,http://47.120.48.245:14004
+CORS_ORIGINS=http://localhost:4021,http://127.0.0.1:4021,http://47.120.48.245:14021
 ```
 
 也可以使用脚本：
@@ -155,7 +155,7 @@ TASK_POLL_INTERVAL_SECONDS=1
 cd backend
 uv sync --dev
 uv pip install -r requirements-gpu.txt
-INFERENCE_BACKEND=ultralytics MODEL_PATH=./yolo11n.pt DEVICE=0 uv run uvicorn app.main:app --host 0.0.0.0 --port 8010
+INFERENCE_BACKEND=ultralytics MODEL_PATH=./yolo11n.pt DEVICE=0 uv run uvicorn app.main:app --host 0.0.0.0 --port 8023
 ```
 
 参数说明：
@@ -182,7 +182,7 @@ uv run python scripts/export_tensorrt.py /path/to/best.pt --device 0 --imgsz 640
 
 ```bash
 INFERENCE_BACKEND=tensorrt MODEL_PATH=/path/to/best.engine DEVICE=0 \
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8010
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8023
 ```
 
 TensorRT engine 与构建机器的 GPU、CUDA 和 TensorRT 版本相关，建议直接在 RTX 3090 运行环境中生成。
@@ -324,8 +324,8 @@ docker compose up --build
 Compose 默认启动：
 
 ```text
-backend  -> http://localhost:8010
-frontend -> http://localhost:4004
+backend  -> http://localhost:8023
+frontend -> http://localhost:4021
 ```
 
 启动 Compose 前需在根目录环境中提供 `DATABASE_URL`。当前 Compose 使用 `mock` 推理后端；真实 TensorRT 推理建议在带 NVIDIA Container Runtime 的容器或宿主机中运行。
@@ -363,8 +363,8 @@ uv run pytest
 - PostgreSQL stores assets, tasks, labels, annotation versions, and queue state. Tests may override `DATABASE_URL` with temporary SQLite URLs.
 
 ### Default Ports
-- Backend API: `8010` on the host in local docs; Compose maps host `8010` to container `8000`.
-- Frontend Vite dev server: `4004`.
+- Backend API: `8023` on the host in local docs; Compose maps host `8023` to container `8000`.
+- Frontend Vite dev server: `4021`.
 - PostgreSQL: `5432`.
 
 ### Notes

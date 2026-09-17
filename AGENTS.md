@@ -56,8 +56,8 @@ rtk pip list            rtk pnpm install        rtk npm run <script>
 - PostgreSQL stores assets, tasks, labels, annotation versions, and queue state. Tests may override `DATABASE_URL` with temporary SQLite URLs.
 
 ### Default Ports
-- Backend API: `8010` on the host in local docs; Compose maps host `8010` to container `8000`.
-- Frontend Vite dev server: `4004`.
+- Backend API: `8023` on the host in local docs; Compose maps host `8023` to container `8000`.
+- Frontend Vite dev server: `4021`.
 - PostgreSQL: `5432`.
 
 ### Notes For Codex Agents
