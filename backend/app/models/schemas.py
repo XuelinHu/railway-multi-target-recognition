@@ -260,6 +260,7 @@ class LabelConfig(BaseModel):
     english_name: str = Field(min_length=1, max_length=120, alias="englishName")
     chinese_name: str = Field(min_length=1, max_length=120, alias="chineseName")
     description: str = ""
+    thumbnail_url: str = Field(default="", alias="thumbnailUrl")
     created_at: datetime = Field(default_factory=now_utc, alias="createdAt")
     updated_at: datetime = Field(default_factory=now_utc, alias="updatedAt")
 
@@ -281,6 +282,13 @@ class LabelConfigUpdateRequest(BaseModel):
     english_name: str = Field(min_length=1, max_length=120, alias="englishName")
     chinese_name: str = Field(min_length=1, max_length=120, alias="chineseName")
     description: str = ""
+
+
+class VideoCaptionFrameReviewUpdateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    description_manual: str = Field(default="", max_length=10000, alias="descriptionManual")
+    safety_score: int | None = Field(default=None, ge=0, le=10, alias="safetyScore")
 
 
 class ApiResponse(BaseModel):
@@ -339,6 +347,7 @@ class VideoCaptionVideo(BaseModel):
     height: int | None = Field(default=None, ge=1)
     frame_count: int | None = Field(default=None, ge=1)
     duration_ms: int | None = Field(default=None, ge=0)
+    similar_frames_skipped: int = Field(default=0, ge=0)
     status: VideoCaptionStatus = "pending"
     error: str = ""
     created_at: datetime = Field(default_factory=now_utc)
@@ -357,6 +366,8 @@ class VideoCaptionFrame(BaseModel):
     height: int | None = Field(default=None, ge=1)
     description_text: str = ""
     description_en: str = ""
+    description_manual: str = ""
+    safety_score: int | None = Field(default=None, ge=0, le=10)
     model_id: str = "deepseek-ai/deepseek-vl2-tiny"
     status: VideoCaptionStatus = "pending"
     error: str = ""

@@ -92,6 +92,34 @@ def list_images(
     return ApiResponse(data={"records": [_image_payload(record) for record in data.records], "total": data.total})
 
 
+@router.delete("/{image_id}", response_model=ApiResponse)
+def delete_image(
+    image_id: str,
+    settings: Settings = Depends(get_settings),
+    store: PostgresStore = Depends(get_store),
+    current_user: AuthUser = Depends(require_user),
+) -> ApiResponse:
+    if current_user.role == "reviewer":
+        raise HTTPException(status_code=403, detail="审核员不能删除图片及标注")
+    image = (
+        store.get_image_asset(image_id)
+        if current_user.role in {"reviewer", "admin"}
+        else store.get_accessible_image_asset(image_id, current_user.user_id)
+    )
+    if image is None:
+        raise HTTPException(status_code=404, detail="图片不存在或无权删除")
+    paths = store.delete_image_asset(image_id)
+    if not paths:
+        raise HTTPException(status_code=404, detail="图片不存在")
+    storage_root = settings.data_dir.resolve()
+    if not image.session_id.startswith("video-import:"):
+        for path in paths:
+            candidate = Path(path).resolve()
+            if candidate.is_relative_to(storage_root) and candidate.is_file():
+                candidate.unlink(missing_ok=True)
+    return ApiResponse(data={"deleted": True})
+
+
 def _image_payload(image: ImageAsset) -> dict:
     return {
         "imageId": image.image_id,

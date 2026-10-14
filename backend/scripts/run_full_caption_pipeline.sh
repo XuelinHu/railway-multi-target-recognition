@@ -23,10 +23,12 @@ REPO_DIR="$(cd "${BACKEND_DIR}/.." && pwd)"
 PYTHON="${BACKEND_DIR}/.venv/bin/python"
 LOG_DIR="${REPO_DIR}/logs"
 
-SOURCE_DIR="${SOURCE_DIR:-/ds2/videos/DJI_001}"
+SOURCE_DIR="${SOURCE_DIR:-/ds2/videos/DJI_20260626_railway}"
 BATCH_NAME="${BATCH_NAME:-}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3:14b}"
 MIN_FREE_MIB="${MIN_FREE_MIB:-9000}"
+FRAME_INTERVAL_SECONDS="${FRAME_INTERVAL_SECONDS:-2}"
+SIMILAR_HASH_DISTANCE="${SIMILAR_HASH_DISTANCE:-6}"
 
 mkdir -p "${LOG_DIR}"
 cd "${BACKEND_DIR}"
@@ -55,7 +57,13 @@ fi
 
 # --- Stage 1: frame extraction + Chinese captions ---------------------------------
 log "=== Stage 1/3: frame extraction + Chinese captions ==="
-CAPTION_ARGS=(--source-dir "${SOURCE_DIR}" --min-free-mib "${MIN_FREE_MIB}" --wait-for-vram)
+CAPTION_ARGS=(
+    --source-dir "${SOURCE_DIR}"
+    --frame-interval-seconds "${FRAME_INTERVAL_SECONDS}"
+    --similar-hash-distance "${SIMILAR_HASH_DISTANCE}"
+    --min-free-mib "${MIN_FREE_MIB}"
+    --wait-for-vram
+)
 if [[ -n "${BATCH_NAME}" ]]; then
     CAPTION_ARGS+=(--batch-name "${BATCH_NAME}")
 fi

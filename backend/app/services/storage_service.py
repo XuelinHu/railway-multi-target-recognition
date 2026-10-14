@@ -23,8 +23,9 @@ class FrameSource:
 
 
 class StorageService:
-    def __init__(self, upload_dir: Path) -> None:
+    def __init__(self, upload_dir: Path, legacy_data_dir: Path | None = None) -> None:
         self.upload_dir = upload_dir
+        self.legacy_data_dir = legacy_data_dir
         self.upload_dir.mkdir(parents=True, exist_ok=True)
 
     def save_upload(self, upload: UploadFile) -> Asset:
@@ -67,7 +68,10 @@ class StorageService:
         raise ValueError(f"unsupported asset type: {asset.type}")
 
     def frame_path(self, asset_id: str, frame_index: int) -> Path:
-        return self.upload_dir / asset_id / "frames" / f"frame_{frame_index:06d}.jpg"
+        path = self.upload_dir / asset_id / "frames" / f"frame_{frame_index:06d}.jpg"
+        if path.exists() or self.legacy_data_dir is None:
+            return path
+        return self.legacy_data_dir / "uploads" / asset_id / "frames" / path.name
 
     def _guess_asset_type(self, content_type: str, extension: str) -> str:
         if content_type.startswith("image/") or extension in IMAGE_EXTENSIONS:

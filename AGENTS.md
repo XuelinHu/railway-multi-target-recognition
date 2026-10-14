@@ -51,9 +51,10 @@ rtk pip list            rtk pnpm install        rtk npm run <script>
 ### Database
 - Primary database: PostgreSQL.
 - Default database name: `railway_recognition`.
+- Video captions database: `railway_video_captions` on the same PostgreSQL server.
 - Default database port: `5432`.
 - Default application URL: `postgresql+psycopg://deipss:<PASSWORD>@127.0.0.1:5432/railway_recognition`.
-- PostgreSQL stores assets, tasks, labels, annotation versions, and queue state. Tests may override `DATABASE_URL` with temporary SQLite URLs.
+- PostgreSQL stores assets, tasks, labels, annotation versions, and queue state; video batches, frame indexes and descriptions use `railway_video_captions`. Image/frame files are stored under the configured DS2 `DATA_DIR`. Tests may override `DATABASE_URL` with temporary SQLite URLs.
 
 ### Default Ports
 - Backend API: `8023` on the host in local docs; Compose maps host `8023` to container `8000`.

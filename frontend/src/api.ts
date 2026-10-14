@@ -31,6 +31,8 @@ export type ImageHistoryData = {
   total: number;
 };
 
+export type LocalModelCatalog = Record<ImageTaskType, string[]>;
+
 export type ImageTask = {
   taskId: string;
   imageId: string;
@@ -81,6 +83,7 @@ export type LabelConfig = {
   englishName: string;
   chineseName: string;
   description: string;
+  thumbnailUrl?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -114,8 +117,9 @@ export type VideoCaptionVideo = {
   height?: number | null;
   frameCount?: number | null;
   durationMs?: number | null;
+  similarFramesSkipped?: number;
   status: "pending" | "processing" | "success" | "failed";
-  error: string;
+  error?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -126,15 +130,17 @@ export type VideoCaptionFrame = {
   videoId: string;
   frameIndex: number;
   timestampMs: number;
-  imagePath: string;
+  imagePath?: string;
   imageUrl: string;
   width?: number | null;
   height?: number | null;
   descriptionText: string;
   descriptionEn: string;
+  descriptionManual: string;
+  safetyScore: number | null;
   modelId: string;
   status: "pending" | "processing" | "success" | "failed";
-  error: string;
+  error?: string;
   resultJson: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -144,6 +150,10 @@ export type VideoCaptionFrameData = {
   records: VideoCaptionFrame[];
   total: number;
 };
+
+export type LabelPageData = { records: LabelConfig[]; total: number };
+export type VideoTermCandidate = { englishName: string; chineseName: string; occurrences: number };
+export type VideoTermCandidatePage = { records: VideoTermCandidate[]; total: number };
 
 export type ApiEnvelope<T> = {
   code: number;
@@ -266,6 +276,14 @@ export function listImages(params: {
   return apiData<ImageHistoryData>(`/api/images/list?${query.toString()}`);
 }
 
+export function deleteImage(imageId: string): Promise<{ deleted: boolean }> {
+  return apiData<{ deleted: boolean }>(`/api/images/${encodeURIComponent(imageId)}`, { method: "DELETE" });
+}
+
+export function listLocalModels(): Promise<LocalModelCatalog> {
+  return apiData<LocalModelCatalog>("/api/video-captions/models");
+}
+
 export function createImageTask(data: {
   imageId: string;
   taskType: ImageTaskType;
@@ -374,6 +392,24 @@ export function listLabels(): Promise<LabelConfig[]> {
   return apiData<LabelConfig[]>("/api/labels");
 }
 
+export function searchLabels(params: { page: number; pageSize: number; query: string }): Promise<LabelPageData> {
+  const query = new URLSearchParams({ page: String(params.page), pageSize: String(params.pageSize), query: params.query });
+  return apiData<LabelPageData>(`/api/labels/search?${query.toString()}`);
+}
+
+export function listVideoTermCandidates(params: { page: number; pageSize: number; query: string }): Promise<VideoTermCandidatePage> {
+  const query = new URLSearchParams({ page: String(params.page), pageSize: String(params.pageSize), query: params.query });
+  return apiData<VideoTermCandidatePage>(`/api/labels/video-term-candidates?${query.toString()}`);
+}
+
+export function findLabelThumbnail(labelId: number): Promise<LabelConfig> {
+  return apiData<LabelConfig>(`/api/labels/${labelId}/thumbnail`, { method: "POST" });
+}
+
+export function findMissingLabelThumbnails(): Promise<{ updated: LabelConfig[]; searched: number; found: number }> {
+  return apiData<{ updated: LabelConfig[]; searched: number; found: number }>("/api/labels/thumbnails/lookup", { method: "POST" });
+}
+
 export function createLabel(data: {
   englishName: string;
   chineseName: string;
@@ -430,6 +466,21 @@ export function listVideoCaptionFrames(params: {
   });
   if (params.query) query.set("query", params.query);
   return apiData<VideoCaptionFrameData>(`/api/video-captions/videos/${params.videoId}/frames?${query.toString()}`);
+}
+
+export function updateVideoCaptionFrameReview(
+  frameId: string,
+  data: { descriptionManual: string; safetyScore: number | null },
+): Promise<VideoCaptionFrame> {
+  return apiData<VideoCaptionFrame>(`/api/video-captions/frames/${frameId}/review`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function translateVideoCaptionFrame(frameId: string): Promise<VideoCaptionFrame> {
+  return apiData<VideoCaptionFrame>(`/api/video-captions/frames/${frameId}/translate`, { method: "POST" });
 }
 
 export function assetUrl(path?: string | null): string {

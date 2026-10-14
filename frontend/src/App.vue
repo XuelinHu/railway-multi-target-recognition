@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import DOMPurify from "dompurify";
+import { marked } from "marked";
 import {
   Boxes,
   Camera,
   Check,
+  ClipboardCopy,
   ChevronLeft,
   ChevronRight,
   Copy,
@@ -46,6 +49,8 @@ import {
   type ImageTaskStatus,
   type ImageTaskType,
   type LabelConfig,
+  type LocalModelCatalog,
+  type VideoTermCandidate,
   type VideoCaptionBatch,
   type VideoCaptionFrame,
   type VideoCaptionVideo,
@@ -54,17 +59,25 @@ import {
   createLabel,
   copyLabel,
   deleteLabel,
+  deleteImage,
   getTaskResult,
   getTaskResultVersion,
   inferImageTask,
   getCurrentUser,
   listImages,
+  listLocalModels,
   listLabels,
   listUsers,
   listTaskResultVersions,
   listVideoCaptionBatches,
   listVideoCaptionFrames,
   listVideoCaptionVideos,
+  searchLabels,
+  listVideoTermCandidates,
+  findLabelThumbnail,
+  findMissingLabelThumbnails,
+  updateVideoCaptionFrameReview,
+  translateVideoCaptionFrame,
   login,
   logout,
   register,
@@ -132,15 +145,15 @@ type AnnotationShape = {
 };
 
 const taskConfigs: TaskConfig[] = [
-  { type: "detection", title: "目标检测", description: "检测框、类别与置信度", models: ["yolo11n", "yolov8n"] },
-  { type: "segmentation", title: "实例分割", description: "区域 mask、轮廓与类别", models: ["yolo11n-seg"] },
-  { type: "pose", title: "姿态识别", description: "关键点与骨架连线", models: ["yolo11n-pose"] },
-  { type: "classification", title: "图像分类", description: "分类标签与概率", models: ["yolo11n-cls"] },
+  { type: "detection", title: "目标检测", description: "检测框、类别与置信度", models: [] },
+  { type: "segmentation", title: "实例分割", description: "区域 mask、轮廓与类别", models: [] },
+  { type: "pose", title: "姿态识别", description: "关键点与骨架连线", models: [] },
+  { type: "classification", title: "图像分类", description: "分类标签与概率", models: [] },
   {
     type: "caption",
     title: "图像描述",
     description: "生成图片描述文本",
-    models: ["deepseek-vl2-tiny", "blip-image-captioning-base", "yolo-cls-fallback"],
+    models: [],
   },
 ];
 
@@ -174,6 +187,11 @@ const selectedModelByTask = reactive<Record<ImageTaskType, string>>({
 });
 
 const imageHistoryList = ref<ImageAsset[]>([]);
+const imageHistoryPage = ref(1);
+const imageHistoryTotal = ref(0);
+const imageHistoryPageSize = ref(30);
+const imageHistoryPageSizeInput = ref("30");
+const localModelCatalog = ref<LocalModelCatalog>({ detection: [], segmentation: [], pose: [], classification: [], caption: [] });
 const labels = ref<LabelConfig[]>([]);
 const activeRequestCount = ref(0);
 const loading = computed(() => activeRequestCount.value > 0);
@@ -184,7 +202,7 @@ const historyCollapsed = ref(false);
 const thumbnailCollapsed = ref(false);
 const workspaceBodyRef = ref<HTMLElement | null>(null);
 const panelLayout = reactive({
-  historyWidth: 280,
+  historyWidth: 320,
   thumbnailWidth: 300,
   resizing: null as ResizeSide | null,
 });
@@ -217,12 +235,28 @@ const selectedVideoCaptionVideoId = ref("");
 const selectedVideoCaptionFrameId = ref("");
 const videoCaptionQuery = ref("");
 const videoCaptionTotal = ref(0);
-const activeCaptionLang = ref<"zh" | "en">("zh");
-const framePreviewEl = ref<HTMLElement | null>(null);
+const videoCaptionPage = ref(1);
+const videoCaptionPageSize = ref(20);
 const lightboxStageEl = ref<HTMLElement | null>(null);
-const frameZoomTarget = computed(() => (lightboxFrameId.value ? lightboxStageEl.value : framePreviewEl.value));
+const frameZoomTarget = computed(() => lightboxStageEl.value);
 const frameView = reactive({ zoom: 1, x: 0, y: 0, dragging: false, startX: 0, startY: 0, originX: 0, originY: 0 });
 const lightboxFrameId = ref("");
+const lightboxTaskType = ref<"detection" | "segmentation" | "pose">("detection");
+const manualFrameDescription = ref("");
+const frameSafetyScore = ref<number | null>(null);
+const frameReviewBusy = ref(false);
+const frameTranslationBusy = ref(false);
+const settingsLabelRecords = ref<LabelConfig[]>([]);
+const settingsLabelTotal = ref(0);
+const settingsLabelPage = ref(1);
+const settingsLabelPageSize = 20;
+const settingsLabelQuery = ref("");
+const termCandidates = ref<VideoTermCandidate[]>([]);
+const termCandidateTotal = ref(0);
+const termCandidatePage = ref(1);
+const termCandidateQuery = ref("");
+const labelThumbnailBusyId = ref<number | null>(null);
+const allLabelThumbnailsBusy = ref(false);
 watch(selectedVideoCaptionFrameId, () => resetFrameView());
 
 const defaultSessionId = "default";
@@ -309,7 +343,7 @@ async function restoreLoginState() {
 }
 
 async function initializeAuthenticatedWorkspace() {
-  await Promise.all([loadLabels(), loadImageHistory()]);
+  await Promise.all([loadLabels(), loadImageHistory(), loadLocalModelCatalog()]);
   const first = imageHistoryList.value[0];
   if (first) await selectImage(first);
 }
@@ -344,6 +378,7 @@ async function signOut() {
 
 async function setTaskType(taskType: ImageTaskType) {
   currentTaskType.value = taskType;
+  imageHistoryPage.value = 1;
   activeTool.value = "select";
   selectedShapeId.value = null;
   message.value = "";
@@ -358,7 +393,16 @@ async function setPage(page: PageMode) {
   if (page === "videoCaptions" && videoCaptionBatches.value.length === 0) {
     await loadVideoCaptionBatches();
   }
-  if (page === "settings" && isAdmin.value) await loadUsers();
+  if (page === "settings") {
+    await Promise.all([loadSettingsLabelPage(), loadTermCandidates()]);
+    if (isAdmin.value) await loadUsers();
+  }
+}
+
+async function refreshSettingsData() {
+  await runBusy(async () => {
+    await Promise.all([loadLabels(), loadSettingsLabelPage(), loadTermCandidates()]);
+  }, "标签配置刷新失败");
 }
 
 async function handleUpload(event: Event) {
@@ -375,6 +419,7 @@ async function handleUpload(event: Event) {
   await runBusy(async () => {
     const image = await uploadImage(file, currentTaskType.value, defaultSessionId);
     await bindImageToCurrentTask(image);
+    imageHistoryPage.value = 1;
     await loadImageHistory();
     message.value = "上传完成，原图已保存";
   }, "图片上传失败，请稍后重试");
@@ -382,29 +427,65 @@ async function handleUpload(event: Event) {
 
 async function loadImageHistory() {
   await runBusy(async () => {
-    const records: ImageAsset[] = [];
-    let page = 1;
-    let total = 0;
-    do {
-      const data = await listImages({ taskType: currentTaskType.value, page, pageSize: 200 });
-      records.push(...data.records);
-      total = data.total;
-      page += 1;
-    } while (records.length < total);
-    imageHistoryList.value = records;
+    const data = await listImages({ taskType: currentTaskType.value, page: imageHistoryPage.value, pageSize: imageHistoryPageSize.value });
+    imageHistoryList.value = data.records;
+    imageHistoryTotal.value = data.total;
   }, "历史图片加载失败");
+}
+
+async function changeImageHistoryPageSize(event: Event) {
+  const size = Number((event.target as HTMLInputElement).value);
+  if (!Number.isInteger(size) || size < 1 || size > 200) {
+    imageHistoryPageSizeInput.value = String(imageHistoryPageSize.value);
+    return;
+  }
+  if (size === imageHistoryPageSize.value) return;
+  imageHistoryPageSize.value = size;
+  imageHistoryPageSizeInput.value = String(size);
+  imageHistoryPage.value = 1;
+  await loadImageHistory();
+}
+
+async function loadLocalModelCatalog() {
+  localModelCatalog.value = await listLocalModels();
+  for (const config of taskConfigs) config.models = localModelCatalog.value[config.type];
+  for (const config of taskConfigs) {
+    if (!config.models.includes(selectedModelByTask[config.type])) {
+      selectedModelByTask[config.type] = config.models[0] ?? "";
+    }
+  }
+}
+
+async function changeImageHistoryPage(page: number) {
+  const lastPage = Math.max(1, Math.ceil(imageHistoryTotal.value / imageHistoryPageSize.value));
+  imageHistoryPage.value = Math.min(lastPage, Math.max(1, page));
+  await loadImageHistory();
+}
+
+async function removeHistoryImage(image: ImageAsset) {
+  if (!window.confirm(`删除“${image.originalName}”及其识别结果、标注版本和文件？此操作不可撤销。`)) return;
+  await runBusy(async () => {
+    await deleteImage(image.imageId);
+    if (currentState.value.currentImageId === image.imageId) {
+      for (const state of Object.values(taskStates)) Object.assign(state, createDefaultTaskState());
+    }
+    if (imageHistoryList.value.length === 1 && imageHistoryPage.value > 1) imageHistoryPage.value -= 1;
+    await loadImageHistory();
+    message.value = "图片及关联标注数据已删除";
+  }, "删除图片失败");
 }
 
 async function selectImage(image: ImageAsset) {
   await runBusy(async () => {
     await bindImageToCurrentTask(image);
+    const sessionId = image.sessionId || defaultSessionId;
     const result = await getTaskResult({
       imageId: image.imageId,
       taskType: currentTaskType.value,
-      sessionId: image.sessionId || defaultSessionId,
+      sessionId,
     });
     applyTaskResult(result);
-    await loadCurrentVersions();
+    await loadCurrentVersions(sessionId);
     message.value = result ? "任务结果已加载" : "当前图片暂无该任务结果";
     resetView();
   }, "图片或任务结果加载失败");
@@ -685,6 +766,7 @@ async function selectVideoCaptionBatch(batchId: string) {
 async function selectVideoCaptionVideo(videoId: string) {
   selectedVideoCaptionVideoId.value = videoId;
   selectedVideoCaptionFrameId.value = "";
+  videoCaptionPage.value = 1;
   await runBusy(loadVideoCaptionFrames, "视频帧加载失败");
 }
 
@@ -697,8 +779,8 @@ async function loadVideoCaptionFrames() {
   }
   const data = await listVideoCaptionFrames({
     videoId: selectedVideoCaptionVideoId.value,
-    page: 1,
-    pageSize: 500,
+    page: videoCaptionPage.value,
+    pageSize: videoCaptionPageSize.value,
     query: videoCaptionQuery.value.trim(),
   });
   videoCaptionFrames.value = data.records;
@@ -709,11 +791,46 @@ async function loadVideoCaptionFrames() {
 }
 
 async function searchVideoCaptionFrames() {
+  videoCaptionPage.value = 1;
   await runBusy(loadVideoCaptionFrames, "帧描述检索失败");
+}
+
+async function changeVideoCaptionPage(page: number) {
+  const lastPage = Math.max(1, Math.ceil(videoCaptionTotal.value / videoCaptionPageSize.value));
+  videoCaptionPage.value = Math.min(lastPage, Math.max(1, page));
+  await runBusy(loadVideoCaptionFrames, "视频帧分页加载失败");
+}
+
+async function changeVideoCaptionPageSize(event: Event) {
+  const pageSize = Number((event.target as HTMLSelectElement).value);
+  if (![10, 20, 30, 50].includes(pageSize) || pageSize === videoCaptionPageSize.value) return;
+  videoCaptionPageSize.value = pageSize;
+  videoCaptionPage.value = 1;
+  await runBusy(loadVideoCaptionFrames, "视频帧分页加载失败");
 }
 
 function selectVideoCaptionFrame(frameId: string) {
   selectedVideoCaptionFrameId.value = frameId;
+  const frame = videoCaptionFrames.value.find((item) => item.frameId === frameId);
+  if (frame) openFrameLightbox(frame);
+}
+
+function setFrameSafetyScore(event: Event) {
+  const input = event.target as HTMLInputElement;
+  if (input.value === "") {
+    frameSafetyScore.value = null;
+    return;
+  }
+  frameSafetyScore.value = Math.max(0, Math.min(10, Math.trunc(Number(input.value))));
+}
+
+function frameVisionSummary(task: "detection" | "segmentation" | "pose", listKey: string) {
+  const result = selectedVideoCaptionFrame.value?.resultJson[task] as Record<string, unknown> | undefined;
+  const items = result?.[listKey];
+  if (!Array.isArray(items)) return result?.error ? "推理失败" : "0";
+  if (task === "pose") return `${items.length} 人体姿态`;
+  const labels = items.map((item) => String((item as Record<string, unknown>).label ?? "目标"));
+  return `${items.length} 个：${labels.slice(0, 5).join("、")}${labels.length > 5 ? "…" : ""}`;
 }
 
 const FRAME_MIN_ZOOM = 1;
@@ -721,6 +838,44 @@ const FRAME_MAX_ZOOM = 5;
 const lightboxFrame = computed(
   () => videoCaptionFrames.value.find((frame) => frame.frameId === lightboxFrameId.value) ?? null,
 );
+const lightboxAnalysis = computed(
+  () => (lightboxFrame.value?.resultJson?.[lightboxTaskType.value] as Record<string, any> | undefined) ?? {},
+);
+const lightboxImageSize = computed(() => {
+  const dimensions = lightboxAnalysis.value.image as { width?: number; height?: number } | undefined;
+  return { width: dimensions?.width ?? lightboxFrame.value?.width ?? 1920, height: dimensions?.height ?? lightboxFrame.value?.height ?? 1080 };
+});
+const detectionOverlayBoxes = computed(() => (lightboxAnalysis.value.objects as Array<Record<string, any>> | undefined) ?? []);
+const segmentationOverlayPolygons = computed(() => (lightboxAnalysis.value.segments as Array<Record<string, any>> | undefined) ?? []);
+const poseOverlayPoints = computed(() => {
+  const poses = (lightboxAnalysis.value.poses as Array<Record<string, any>> | undefined) ?? [];
+  return poses.flatMap((pose, poseIndex) => ((pose.keypoints as number[][] | undefined) ?? []).map((point, index) => ({
+    key: `${poseIndex}-${index}`,
+    name: poseKeypointNames[index] ?? `point_${index}`,
+    poseIndex,
+    x: Number(point[0]),
+    y: Number(point[1]),
+    score: Number((pose.confidence as number[] | undefined)?.[index] ?? 1),
+  })));
+});
+const poseKeypointNames = ["nose", "left_eye", "right_eye", "left_ear", "right_ear", "left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_wrist", "right_wrist", "left_hip", "right_hip", "left_knee", "right_knee", "left_ankle", "right_ankle"];
+const poseOverlayBones = computed(() => {
+  const pointsByName = new Map(poseOverlayPoints.value.map((point) => [`${point.poseIndex}:${point.name}`, point]));
+  const poseIndexes = new Set(poseOverlayPoints.value.map((point) => point.poseIndex));
+  return poseSkeletonPairs.flatMap(([start, end], index) => {
+    return [...poseIndexes].flatMap((poseIndex) => {
+      const a = pointsByName.get(`${poseIndex}:${start}`);
+      const b = pointsByName.get(`${poseIndex}:${end}`);
+      return a && b && a.score > 0.05 && b.score > 0.05 && (a.x > 0 || a.y > 0) && (b.x > 0 || b.y > 0)
+        ? [{ key: `${poseIndex}-${index}`, x1: a.x, y1: a.y, x2: b.x, y2: b.y, score: Math.min(a.score, b.score) }]
+        : [];
+    });
+  });
+});
+watch(selectedVideoCaptionFrame, (frame) => {
+  manualFrameDescription.value = frame?.descriptionManual ?? "";
+  frameSafetyScore.value = frame?.safetyScore ?? null;
+});
 
 function resetFrameView() {
   frameView.zoom = 1;
@@ -781,7 +936,10 @@ function stopFrameDrag() {
 
 function openFrameLightbox(frame: VideoCaptionFrame) {
   lightboxFrameId.value = frame.frameId;
-  selectVideoCaptionFrame(frame.frameId);
+  selectedVideoCaptionFrameId.value = frame.frameId;
+  lightboxTaskType.value = "detection";
+  manualFrameDescription.value = frame.descriptionManual ?? "";
+  frameSafetyScore.value = frame.safetyScore ?? null;
   resetFrameView();
 }
 
@@ -822,6 +980,126 @@ function handleVideoCaptionKeydown(event: KeyboardEvent) {
   }
 }
 
+function renderMarkdown(text: string) {
+  return DOMPurify.sanitize(marked.parse(text || "暂无描述", { async: false }) as string);
+}
+
+async function saveCaptionReview() {
+  if (!lightboxFrame.value) return;
+  frameReviewBusy.value = true;
+  try {
+    const updated = await updateVideoCaptionFrameReview(lightboxFrame.value.frameId, {
+      descriptionManual: manualFrameDescription.value,
+      safetyScore: frameSafetyScore.value,
+    });
+    videoCaptionFrames.value = videoCaptionFrames.value.map((frame) => frame.frameId === updated.frameId ? updated : frame);
+    message.value = "人工描述和安全评分已保存";
+  } catch (error) {
+    errorDialog.value = error instanceof Error ? error.message : "保存失败";
+  } finally {
+    frameReviewBusy.value = false;
+  }
+}
+
+async function generateCaptionEnglish() {
+  if (!lightboxFrame.value) return;
+  frameTranslationBusy.value = true;
+  try {
+    const updated = await translateVideoCaptionFrame(lightboxFrame.value.frameId);
+    videoCaptionFrames.value = videoCaptionFrames.value.map((frame) => frame.frameId === updated.frameId ? updated : frame);
+  } catch (error) {
+    errorDialog.value = error instanceof Error ? error.message : "英文翻译失败";
+  } finally {
+    frameTranslationBusy.value = false;
+  }
+}
+
+async function loadSettingsLabelPage() {
+  const result = await searchLabels({ page: settingsLabelPage.value, pageSize: settingsLabelPageSize, query: settingsLabelQuery.value.trim() });
+  settingsLabelRecords.value = result.records;
+  settingsLabelTotal.value = result.total;
+}
+
+async function searchSettingsLabels() {
+  settingsLabelPage.value = 1;
+  await loadSettingsLabelPage();
+}
+
+async function changeSettingsLabelPage(page: number) {
+  const maxPage = Math.max(1, Math.ceil(settingsLabelTotal.value / settingsLabelPageSize));
+  settingsLabelPage.value = Math.max(1, Math.min(maxPage, page));
+  await loadSettingsLabelPage();
+}
+
+async function loadTermCandidates() {
+  const result = await listVideoTermCandidates({ page: termCandidatePage.value, pageSize: 20, query: termCandidateQuery.value.trim() });
+  termCandidates.value = result.records;
+  termCandidateTotal.value = result.total;
+}
+
+async function searchTermCandidates() {
+  termCandidatePage.value = 1;
+  await loadTermCandidates();
+}
+
+async function addTermCandidate(candidate: VideoTermCandidate) {
+  await runBusy(async () => {
+    const created = await createLabel({ englishName: candidate.englishName, chineseName: candidate.chineseName, description: `从视频帧中文描述提取（${candidate.occurrences} 次）` });
+    try {
+      await findLabelThumbnail(created.labelId);
+    } catch {
+      // The label remains usable without a matching public thumbnail.
+    }
+    await Promise.all([loadLabels(), loadSettingsLabelPage(), loadTermCandidates()]);
+    message.value = `已添加标签：${candidate.chineseName}`;
+  }, "添加描述词标签失败");
+}
+
+async function lookupLabelThumbnail(labelId: number) {
+  labelThumbnailBusyId.value = labelId;
+  try {
+    const updated = await findLabelThumbnail(labelId);
+    settingsLabelRecords.value = settingsLabelRecords.value.map((label) => label.labelId === labelId ? updated : label);
+    labels.value = labels.value.map((label) => label.labelId === labelId ? updated : label);
+  } catch (error) {
+    errorDialog.value = error instanceof Error ? error.message : "缩略图检索失败";
+  } finally {
+    labelThumbnailBusyId.value = null;
+  }
+}
+
+async function lookupMissingLabelThumbnails() {
+  allLabelThumbnailsBusy.value = true;
+  try {
+    const result = await findMissingLabelThumbnails();
+    const byId = new Map(result.updated.map((label) => [label.labelId, label]));
+    settingsLabelRecords.value = settingsLabelRecords.value.map((label) => byId.get(label.labelId) ?? label);
+    labels.value = labels.value.map((label) => byId.get(label.labelId) ?? label);
+    message.value = `在线搜索 ${result.searched} 个标签，找到 ${result.found} 张缩略图`;
+  } catch (error) {
+    errorDialog.value = error instanceof Error ? error.message : "批量缩略图检索失败";
+  } finally {
+    allLabelThumbnailsBusy.value = false;
+  }
+}
+
+async function copyLabelText(label: LabelConfig) {
+  const text = `${label.englishName}\t${label.chineseName}\t${label.description}`;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand("copy");
+    input.remove();
+  }
+  message.value = `已复制标签：${label.chineseName}`;
+}
+
 async function submitLabel() {
   await runBusy(async () => {
     await createLabel({
@@ -833,6 +1111,7 @@ async function submitLabel() {
     labelForm.chineseName = "";
     labelForm.description = "";
     await loadLabels();
+    await loadSettingsLabelPage();
     message.value = "标签已新增";
   }, "新增标签失败");
 }
@@ -848,6 +1127,7 @@ async function duplicateLabel(labelId: number) {
   await runBusy(async () => {
     await copyLabel(labelId);
     await loadLabels();
+    await loadSettingsLabelPage();
     message.value = "标签已复制";
   }, "复制标签失败");
 }
@@ -861,6 +1141,7 @@ async function submitEditLabel(labelId: number) {
     });
     editingLabelId.value = null;
     await loadLabels();
+    await loadSettingsLabelPage();
     message.value = "标签已更新";
   }, "更新标签失败");
 }
@@ -870,6 +1151,7 @@ async function removeLabel(labelId: number) {
     await deleteLabel(labelId);
     if (selectedShape.value?.labelId === labelId) selectedShapeId.value = null;
     await loadLabels();
+    await loadSettingsLabelPage();
     message.value = "标签已删除";
   }, "删除标签失败");
 }
@@ -1268,6 +1550,10 @@ function polygonPoints(points: Point[]) {
   return points.map((point) => `${point.x},${point.y}`).join(" ");
 }
 
+function coordinatePairsToPoints(points: number[][]) {
+  return points.map(([x, y]) => `${x},${y}`).join(" ");
+}
+
 function linePoints(points: Point[]) {
   return points.length >= 2 ? { x1: points[0].x, y1: points[0].y, x2: points[1].x, y2: points[1].y } : { x1: 0, y1: 0, x2: 0, y2: 0 };
 }
@@ -1381,6 +1667,10 @@ async function runBusy(action: () => Promise<void>, fallback: string) {
 
 function currentImageSessionId() {
   return currentState.value.imageInfo?.sessionId || defaultSessionId;
+}
+
+function currentImageUserId() {
+  return currentState.value.imageInfo?.sessionId?.startsWith("video-import:") ? null : currentUser.value?.userId;
 }
 
 function playCaption() {
@@ -1541,21 +1831,29 @@ function reviewStatusText(status: ImageReviewStatus) {
           </label>
           <button class="ghost-button" :disabled="loading" @click="loadImageHistory"><RefreshCw :size="16" /> 刷新历史</button>
           <div class="history-list">
-            <button
+            <div
               v-for="image in imageHistoryList"
               :key="image.imageId"
               class="history-item"
               :class="{ selected: image.imageId === currentState.currentImageId }"
-              @click="selectImage(image)"
             >
-              <img :src="assetUrl(image.imageUrl)" alt="" />
-              <span>
+              <button class="history-select" @click="selectImage(image)">
                 <strong>{{ image.originalName }}</strong>
                 <small>{{ formatTime(image.createdAt) }}</small>
                 <small>{{ statusText(image.taskStatus) }} · {{ image.hasCurrentTaskResult ? "已有结果" : "暂无结果" }}</small>
-              </span>
-            </button>
+              </button>
+              <button class="history-delete" title="删除图片及标注" :disabled="loading" @click.stop="removeHistoryImage(image)"><Trash2 :size="15" /></button>
+            </div>
             <div v-if="imageHistoryList.length === 0" class="empty-state">暂无历史图片</div>
+          </div>
+          <div class="pagination-controls">
+            <label class="page-size-control">
+              <span>每页</span>
+              <input v-model="imageHistoryPageSizeInput" type="number" min="1" max="200" aria-label="每页显示图片数量" :disabled="loading" @change="changeImageHistoryPageSize" @keydown.enter="changeImageHistoryPageSize" />
+            </label>
+            <button :disabled="loading || imageHistoryPage <= 1" @click="changeImageHistoryPage(imageHistoryPage - 1)">上一页</button>
+            <span>{{ imageHistoryPage }} / {{ Math.max(1, Math.ceil(imageHistoryTotal / imageHistoryPageSize)) }}</span>
+            <button :disabled="loading || imageHistoryPage * imageHistoryPageSize >= imageHistoryTotal" @click="changeImageHistoryPage(imageHistoryPage + 1)">下一页</button>
           </div>
         </template>
       </aside>
@@ -1713,16 +2011,17 @@ function reviewStatusText(status: ImageReviewStatus) {
           </button>
         </div>
         <template v-if="!thumbnailCollapsed">
-          <button v-if="currentState.imageInfo" class="thumbnail-card" @click="originalPreview = currentState.imageInfo">
-            <img :src="currentImageUrl" alt="原图缩略图" />
-          </button>
           <dl v-if="currentState.imageInfo" class="image-info">
             <dt>文件名</dt>
-            <dd>{{ currentState.imageInfo.originalName }}</dd>
-            <dt>分辨率</dt>
-            <dd>{{ currentState.imageInfo.width || "-" }} x {{ currentState.imageInfo.height || "-" }}</dd>
+            <dd :title="currentState.imageInfo.originalName">{{ currentState.imageInfo.originalName }}</dd>
+            <dt>存储位置</dt>
+            <dd :title="currentState.imageInfo.filePath || currentState.imageInfo.fileUrl">{{ currentState.imageInfo.filePath || currentState.imageInfo.fileUrl }}</dd>
             <dt>大小</dt>
             <dd>{{ formatBytes(currentState.imageInfo.fileSize) }}</dd>
+            <dt>数据库</dt>
+            <dd>image_asset → image_task → image_task_result → image_task_result_version</dd>
+            <dt>图片 ID</dt>
+            <dd>{{ currentState.imageInfo.imageId }}</dd>
           </dl>
 
           <section class="result-summary label-preset-summary">
@@ -1732,21 +2031,21 @@ function reviewStatusText(status: ImageReviewStatus) {
             </div>
             <div v-if="labels.length === 0" class="empty-state">请先在系统配置中添加标签</div>
             <div v-else class="label-preset-grid">
-              <button
-                v-for="entry in presetLabels"
-                :key="entry.label.labelId"
-                class="preset-label-button"
-                :class="{ active: entry.label.labelId === activePresetLabel?.labelId }"
-                :title="entry.shortcut ? `快捷键 ${entry.shortcut}` : `标签 #${entry.label.labelId}`"
-                @click="selectPresetLabel(entry.label)"
-              >
-                <kbd v-if="entry.shortcut">{{ entry.shortcut.replace('Shift+', '⇧') }}</kbd>
-                <kbd v-else>--</kbd>
-                <span>
-                  <strong>#{{ entry.label.labelId }} {{ entry.label.chineseName }}</strong>
-                  <small>{{ entry.label.englishName }}</small>
-                </span>
-              </button>
+                <div v-for="entry in presetLabels" :key="entry.label.labelId" class="preset-label-item" :class="{ 'has-shortcut': !!entry.shortcut }">
+                <button
+                  class="preset-label-button"
+                  :class="{ active: entry.label.labelId === activePresetLabel?.labelId }"
+                  :title="`${entry.shortcut ? `快捷键 ${entry.shortcut} · ` : ''}${entry.label.englishName} / ${entry.label.chineseName} · ${entry.label.description}`"
+                  @click="selectPresetLabel(entry.label)"
+                >
+                  <kbd v-if="entry.shortcut">{{ entry.shortcut.replace('Shift+', '⇧') }}</kbd>
+                  <span>
+                    <strong>#{{ entry.label.labelId }} {{ entry.label.chineseName }}</strong>
+                    <small>{{ entry.label.englishName }}</small>
+                  </span>
+                </button>
+                <button class="preset-copy-button" title="复制标签字段" @click.stop="copyLabelText(entry.label)"><Copy :size="13" /></button>
+              </div>
             </div>
           </section>
 
@@ -1803,7 +2102,7 @@ function reviewStatusText(status: ImageReviewStatus) {
                   {{ captionIsTransferring ? "处理中" : "播放中文简体" }}
                 </button>
               </div>
-              <p class="caption-text">{{ currentState.descriptionText || "暂无描述" }}</p>
+              <div class="markdown-content" v-html="renderMarkdown(currentState.descriptionText)" />
             </template>
             <div v-else class="result-row"><strong>标注对象</strong><span>{{ annotationShapes.length }} 个</span></div>
           </section>
@@ -1891,6 +2190,7 @@ function reviewStatusText(status: ImageReviewStatus) {
           >
             <strong>{{ video.displayName || video.filename }}</strong>
             <span>{{ formatDuration(video.durationMs) }} · {{ video.status }}</span>
+            <span v-if="video.similarFramesSkipped">跳过相似帧 {{ video.similarFramesSkipped }}</span>
             <span class="keyword-list">
               <small v-for="keyword in video.keywords" :key="keyword">{{ keyword }}</small>
             </span>
@@ -1921,47 +2221,27 @@ function reviewStatusText(status: ImageReviewStatus) {
           >
             <img :src="assetUrl(frame.imageUrl)" alt="" />
             <span>{{ formatTimestamp(frame.timestampMs) }}</span>
-            <span
-              class="frame-expand"
-              role="button"
-              tabindex="0"
-              title="全屏查看"
-              @click.stop="openFrameLightbox(frame)"
-              @keydown.enter.stop="openFrameLightbox(frame)"
-            >
-              <Maximize2 :size="13" />
-            </span>
           </button>
           <div v-if="videoCaptionFrames.length === 0" class="empty-state">暂无匹配帧</div>
+        </div>
+        <div class="pagination-controls frame-pagination">
+          <label class="page-size-control">
+            <span>每页</span>
+            <select :value="videoCaptionPageSize" :disabled="loading" @change="changeVideoCaptionPageSize">
+              <option :value="10">10 帧</option>
+              <option :value="20">20 帧</option>
+              <option :value="30">30 帧</option>
+              <option :value="50">50 帧</option>
+            </select>
+          </label>
+          <button :disabled="loading || videoCaptionPage <= 1" @click="changeVideoCaptionPage(videoCaptionPage - 1)">上一页</button>
+          <span>{{ videoCaptionPage }} / {{ Math.max(1, Math.ceil(videoCaptionTotal / videoCaptionPageSize)) }} · {{ videoCaptionTotal }} 帧</span>
+          <button :disabled="loading || videoCaptionPage * videoCaptionPageSize >= videoCaptionTotal" @click="changeVideoCaptionPage(videoCaptionPage + 1)">下一页</button>
         </div>
       </section>
 
       <aside class="frame-detail-panel">
         <template v-if="selectedVideoCaptionFrame">
-          <div class="frame-zoom-bar">
-            <button title="放大" @click="zoomFrameAtCenter(1.15, framePreviewEl)"><ZoomIn :size="15" /></button>
-            <button title="缩小" @click="zoomFrameAtCenter(1 / 1.15, framePreviewEl)"><ZoomOut :size="15" /></button>
-            <button title="重置" @click="resetFrameView"><RotateCcw :size="15" /></button>
-            <span>{{ Math.round(frameView.zoom * 100) }}%</span>
-            <button title="全屏查看" @click="openFrameLightbox(selectedVideoCaptionFrame)"><Maximize2 :size="15" /></button>
-          </div>
-          <div
-            ref="framePreviewEl"
-            class="frame-preview"
-            :class="{ 'is-zoomed': frameView.zoom > 1 }"
-            @wheel="onFrameWheel"
-            @pointerdown="onFramePointerDown"
-            @pointermove="onFramePointerMove"
-            @pointerup="stopFrameDrag"
-            @pointercancel="stopFrameDrag"
-            @dblclick="openFrameLightbox(selectedVideoCaptionFrame)"
-          >
-            <img
-              :src="assetUrl(selectedVideoCaptionFrame.imageUrl)"
-              alt="视频帧"
-              :style="{ transform: `translate(${frameView.x}px, ${frameView.y}px) scale(${frameView.zoom})` }"
-            />
-          </div>
           <dl class="image-info">
             <dt>时间</dt>
             <dd>{{ formatTimestamp(selectedVideoCaptionFrame.timestampMs) }}</dd>
@@ -1971,21 +2251,31 @@ function reviewStatusText(status: ImageReviewStatus) {
             <dd>{{ selectedVideoCaptionFrame.modelId }}</dd>
             <dt>状态</dt>
             <dd>{{ selectedVideoCaptionFrame.status }}</dd>
+            <dt>安全评分</dt>
+            <dd>{{ selectedVideoCaptionFrame.safetyScore ?? "未评分" }} / 10</dd>
           </dl>
-          <section class="result-summary">
-            <div class="caption-head">
-              <h2>DeepSeek 描述</h2>
-              <div class="caption-lang-tabs">
-                <button :class="{ active: activeCaptionLang === 'zh' }" @click="activeCaptionLang = 'zh'">中文</button>
-                <button :class="{ active: activeCaptionLang === 'en' }" @click="activeCaptionLang = 'en'">EN</button>
-              </div>
+          <section class="result-summary frame-vision-summary">
+            <h2>视觉识别结果</h2>
+            <dl class="image-info">
+              <dt>目标检测</dt>
+              <dd>{{ frameVisionSummary("detection", "objects") }}</dd>
+              <dt>实例分割</dt>
+              <dd>{{ frameVisionSummary("segmentation", "segments") }}</dd>
+              <dt>姿态识别</dt>
+              <dd>{{ frameVisionSummary("pose", "poses") }}</dd>
+            </dl>
+          </section>
+          <section class="result-summary frame-descriptions">
+            <h2>DeepSeek 描述 · 中文</h2>
+            <div class="markdown-content" v-html="renderMarkdown(selectedVideoCaptionFrame.descriptionText)" />
+            <div class="frame-description-en-heading">
+              <h2>English</h2>
+              <button v-if="!selectedVideoCaptionFrame.descriptionEn" :disabled="frameTranslationBusy" @click="generateFrameEnglish">
+                <Loader2 v-if="frameTranslationBusy" class="spin" :size="14" />
+                <Sparkles v-else :size="14" />本地生成
+              </button>
             </div>
-            <p v-if="activeCaptionLang === 'zh'" class="caption-text">
-              {{ selectedVideoCaptionFrame.descriptionText || selectedVideoCaptionFrame.error || "暂无描述" }}
-            </p>
-            <p v-else class="caption-text">
-              {{ selectedVideoCaptionFrame.descriptionEn || "暂无英文描述" }}
-            </p>
+            <div class="markdown-content" v-html="renderMarkdown(selectedVideoCaptionFrame.descriptionEn || '暂无英文描述')" />
           </section>
         </template>
         <div v-else class="empty-state detail-empty">请选择一个视频帧</div>
@@ -2002,7 +2292,7 @@ function reviewStatusText(status: ImageReviewStatus) {
           <h2><Tags :size="22" />标签配置</h2>
           <p>标签 ID 由系统从 0 开始生成，英文名用于模型和导出，中文名用于人工校验界面。</p>
         </div>
-        <button :disabled="loading" @click="loadLabels"><RefreshCw :size="16" />刷新</button>
+        <button :disabled="loading" @click="refreshSettingsData"><RefreshCw :size="16" />刷新</button>
       </div>
 
       <form v-if="isAdmin" class="label-form" @submit.prevent="submitLabel">
@@ -2012,13 +2302,29 @@ function reviewStatusText(status: ImageReviewStatus) {
         <button :disabled="loading"><Plus :size="16" />新增标签</button>
       </form>
 
+      <div class="settings-tools-row">
+      <form class="settings-label-search" @submit.prevent="searchSettingsLabels">
+          <Search :size="16" />
+          <input v-model="settingsLabelQuery" placeholder="搜索中英文标签或描述" />
+          <button :disabled="loading">查询</button>
+      </form>
+      <button v-if="isAdmin" :disabled="allLabelThumbnailsBusy" @click="lookupMissingLabelThumbnails">
+        <Loader2 v-if="allLabelThumbnailsBusy" class="spin" :size="15" /><ImageIcon v-else :size="15" />查找缺失缩略图
+      </button>
+      </div>
       <div class="label-table">
         <div class="label-table-head">
-          <span>ID</span><span>英文</span><span>中文</span><span>描述</span><span>生成日期</span><span>修改日期</span><span>操作</span>
+          <span>ID</span><span>图</span><span>英文</span><span>中文</span><span>描述</span><span>生成日期</span><span>修改日期</span><span>操作</span>
         </div>
-        <div v-if="labels.length === 0" class="empty-state table-empty">暂无标签配置</div>
-        <div v-for="label in labels" :key="label.labelId" class="label-row">
+        <div v-if="settingsLabelRecords.length === 0" class="empty-state table-empty">暂无标签配置</div>
+        <div v-for="label in settingsLabelRecords" :key="label.labelId" class="label-row">
           <span>#{{ label.labelId }}</span>
+          <span class="label-thumbnail-cell">
+            <img v-if="label.thumbnailUrl" :src="label.thumbnailUrl" :alt="label.chineseName" loading="lazy" />
+            <button v-else title="在线查找缩略图" :disabled="labelThumbnailBusyId === label.labelId" @click="lookupLabelThumbnail(label.labelId)">
+              <Loader2 v-if="labelThumbnailBusyId === label.labelId" class="spin" :size="14" /><ImageIcon v-else :size="15" />
+            </button>
+          </span>
           <template v-if="editingLabelId === label.labelId">
             <input v-model="editingLabel.englishName" />
             <input v-model="editingLabel.chineseName" />
@@ -2031,19 +2337,48 @@ function reviewStatusText(status: ImageReviewStatus) {
             </span>
           </template>
           <template v-else>
-            <span>{{ label.englishName }}</span>
-            <span>{{ label.chineseName }}</span>
-            <span>{{ label.description || "-" }}</span>
+            <span :title="label.englishName">{{ label.englishName }}</span>
+            <span :title="label.chineseName">{{ label.chineseName }}</span>
+            <span class="label-description-cell" :title="label.description || '-'">{{ label.description || "-" }}</span>
             <span>{{ formatTime(label.createdAt) }}</span>
             <span>{{ formatTime(label.updatedAt) }}</span>
             <span v-if="isAdmin" class="row-actions">
               <button title="编辑" @click="startEditLabel(label)"><Edit3 :size="15" /></button>
               <button title="复制标签" @click="duplicateLabel(label.labelId)"><Copy :size="15" /></button>
+              <button title="复制标签文本" @click="copyLabelText(label)"><ClipboardCopy :size="15" /></button>
               <button title="删除" @click="removeLabel(label.labelId)"><Trash2 :size="15" /></button>
             </span>
           </template>
         </div>
       </div>
+
+      <div class="pagination-controls label-pagination">
+        <span>共 {{ settingsLabelTotal }} 个标签</span>
+        <button :disabled="settingsLabelPage <= 1" @click="changeSettingsLabelPage(settingsLabelPage - 1)">上一页</button>
+        <span>{{ settingsLabelPage }} / {{ Math.max(1, Math.ceil(settingsLabelTotal / settingsLabelPageSize)) }}</span>
+        <button :disabled="settingsLabelPage * settingsLabelPageSize >= settingsLabelTotal" @click="changeSettingsLabelPage(settingsLabelPage + 1)">下一页</button>
+      </div>
+
+      <section class="term-candidates">
+        <div class="settings-header">
+          <div><h2><Tags :size="20" />描述词候选</h2><p>从视频帧中文描述中提取的高频名词</p></div>
+          <form class="settings-label-search" @submit.prevent="searchTermCandidates"><Search :size="16" /><input v-model="termCandidateQuery" placeholder="筛选候选词" /><button>查询</button></form>
+        </div>
+        <div class="term-candidate-list">
+          <div v-for="term in termCandidates" :key="term.englishName" class="term-candidate-row">
+            <span class="term-thumb" :title="term.chineseName">{{ term.chineseName.slice(0, 2) }}</span>
+            <strong>{{ term.chineseName }}</strong><small>{{ term.occurrences }} 次</small>
+            <button v-if="isAdmin" title="加入标签" @click="addTermCandidate(term)"><Plus :size="15" /></button>
+          </div>
+          <div v-if="termCandidates.length === 0" class="empty-state">暂无待添加的高频名词</div>
+        </div>
+        <div class="pagination-controls">
+          <span>共 {{ termCandidateTotal }} 个候选</span>
+          <button :disabled="termCandidatePage <= 1" @click="termCandidatePage--; loadTermCandidates()">上一页</button>
+          <span>{{ termCandidatePage }} / {{ Math.max(1, Math.ceil(termCandidateTotal / 20)) }}</span>
+          <button :disabled="termCandidatePage * 20 >= termCandidateTotal" @click="termCandidatePage++; loadTermCandidates()">下一页</button>
+        </div>
+      </section>
 
       <template v-if="isAdmin">
         <div class="settings-header user-admin-header">
@@ -2108,6 +2443,11 @@ function reviewStatusText(status: ImageReviewStatus) {
             <button title="关闭" @click="closeFrameLightbox">关闭</button>
           </div>
         </header>
+        <nav class="lightbox-analysis-tabs" aria-label="识别结果">
+          <button :class="{ active: lightboxTaskType === 'detection' }" @click="lightboxTaskType = 'detection'">目标检测</button>
+          <button :class="{ active: lightboxTaskType === 'segmentation' }" @click="lightboxTaskType = 'segmentation'">实例分割</button>
+          <button :class="{ active: lightboxTaskType === 'pose' }" @click="lightboxTaskType = 'pose'">姿态识别</button>
+        </nav>
         <div
           ref="lightboxStageEl"
           class="lightbox-stage"
@@ -2118,15 +2458,38 @@ function reviewStatusText(status: ImageReviewStatus) {
           @pointerup="stopFrameDrag"
           @pointercancel="stopFrameDrag"
         >
-          <img
-            :src="assetUrl(lightboxFrame.imageUrl)"
-            alt="视频帧"
-            :style="{ transform: `translate(${frameView.x}px, ${frameView.y}px) scale(${frameView.zoom})` }"
-          />
+          <div class="lightbox-media" :style="{ aspectRatio: `${lightboxImageSize.width} / ${lightboxImageSize.height}`, transform: `translate(${frameView.x}px, ${frameView.y}px) scale(${frameView.zoom})` }">
+            <img :src="assetUrl(lightboxFrame.imageUrl)" alt="视频帧" />
+            <svg class="lightbox-overlay" :viewBox="`0 0 ${lightboxImageSize.width} ${lightboxImageSize.height}`" preserveAspectRatio="none">
+              <template v-if="lightboxTaskType === 'detection'">
+                <g v-for="(item, index) in detectionOverlayBoxes" :key="`box-${index}`" class="lightbox-detection">
+                  <rect :x="item.bbox?.x" :y="item.bbox?.y" :width="item.bbox?.width" :height="item.bbox?.height" />
+                  <text :x="item.bbox?.x" :y="Math.max(16, Number(item.bbox?.y ?? 0) - 5)">{{ item.label }} {{ Math.round(Number(item.confidence ?? 0) * 100) }}%</text>
+                </g>
+              </template>
+              <polygon v-else-if="lightboxTaskType === 'segmentation'" v-for="(item, index) in segmentationOverlayPolygons" :key="`segment-${index}`" class="lightbox-segment" :points="coordinatePairsToPoints(item.polygon ?? [])" />
+              <template v-else>
+                <line v-for="bone in poseOverlayBones" :key="bone.key" class="lightbox-pose-bone" :x1="bone.x1" :y1="bone.y1" :x2="bone.x2" :y2="bone.y2" :opacity="Math.max(.45, bone.score)" />
+                <circle v-for="point in poseOverlayPoints" :key="point.key" class="lightbox-pose-point" :cx="point.x" :cy="point.y" :r="Math.max(5, lightboxImageSize.width / 180)" :opacity="Math.max(.45, point.score)" />
+              </template>
+            </svg>
+          </div>
         </div>
         <footer class="lightbox-caption">
-          <p v-if="activeCaptionLang === 'zh'">{{ lightboxFrame.descriptionText || lightboxFrame.error || "暂无描述" }}</p>
-          <p v-else>{{ lightboxFrame.descriptionEn || "暂无英文描述" }}</p>
+          <section>
+            <h3>DeepSeek 描述 · 中文</h3>
+            <div class="markdown-content" v-html="renderMarkdown(lightboxFrame.descriptionText)" />
+            <div class="frame-description-en-heading">
+              <h3>English</h3>
+              <button v-if="!lightboxFrame.descriptionEn" :disabled="frameTranslationBusy" @click="generateCaptionEnglish">本地生成英文</button>
+            </div>
+            <div class="markdown-content" v-html="renderMarkdown(lightboxFrame.descriptionEn || '暂无英文描述')" />
+          </section>
+          <section class="manual-caption-editor">
+            <label><span>人工编辑描述</span><textarea v-model="manualFrameDescription" rows="4" maxlength="10000" /></label>
+            <label class="safety-score-control"><span>安全程度</span><input :value="frameSafetyScore ?? ''" @input="setFrameSafetyScore" type="number" min="0" max="10" step="1" placeholder="未评分" /><output>/ 10</output></label>
+            <button :disabled="frameReviewBusy" @click="saveCaptionReview"><Save :size="15" />保存人工复核</button>
+          </section>
         </footer>
       </div>
     </div>

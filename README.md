@@ -17,10 +17,11 @@
 
 - 图片、视频资源上传与基础元数据提取。
 - 图片统一保存为第 0 帧，视频按 `frame_stride` 逐帧抽取并保存帧图。
+- 专用视频批次支持按时间间隔抽帧、感知哈希跳过相似帧，并生成 DeepSeek 描述、目标检测、实例分割和姿态识别结果。
 - FastAPI 任务接口，支持创建识别任务、查询任务状态。
 - 默认使用 GPU 上的 `yolo11n.pt` 通用 COCO 检测模型；`mock` 仅用于自动化测试。
 - 可选 Ultralytics YOLO 推理后端，用于接入真实 GPU 权重。
-- PostgreSQL 持久化资产、任务、标注和人工校验状态。
+- PostgreSQL `railway_recognition` 持久化图片、任务、标签、标注及版本；独立 PostgreSQL `railway_video_captions` 保存视频批次、视频索引、解帧时间戳和 DeepSeek 描述。
 - PostgreSQL 任务表作为推理队列，使用行锁领取任务，不依赖 Redis。
 - 人工校验支持通过、驳回、目标级确认、编辑和剔除。
 - Web 标注区参考 makeSense.ai 的工作台形态，支持选择、移动画布、矩形框、多边形、线段和缩放查看。
@@ -40,16 +41,33 @@ FastAPI Backend
   API 路由、文件管理、标注保存、格式导出
         |
 PostgreSQL
-  资产/标注存储 + queued 任务表 + SKIP LOCKED worker
+  railway_recognition: 图片/标注 + queued 任务表 + SKIP LOCKED worker
+  railway_video_captions: 视频索引/时间戳/帧描述
         |
 Inference Service
   抽帧 -> mock / Ultralytics YOLO / TensorRT engine -> 帧级标注
         |
 Local Storage
-  data/uploads 保存原始资源和帧图
+  DS2/data/railway-recognition 保存原始图片、视频解帧和描述关联文件
 ```
 
-当前版本使用 PostgreSQL 同时承担业务存储和任务队列。FastAPI 启动后会自动创建数据表，并启动数据库任务 worker。
+图片与视频帧文件保存在本地 DS2 数据目录，PostgreSQL 保存文件路径、记录 ID、任务/描述 JSON 和标注版本，不把图片二进制写入数据库。视频索引与帧描述使用单独的 `railway_video_captions` 数据库；MP4 原始路径及技术元数据不通过前端 API 返回。FastAPI 启动后会自动创建数据表，并启动数据库任务 worker。
+
+## 视频批次处理
+
+2026-06-26 的铁路视频统一存放在 `/ds2/videos/DJI_20260626_railway/`。对新批次重新整理前，先清空旧视频批次/帧记录和历史上传内容；不删除账号、铁路标签配置或模型权重。默认每 2 秒取一个候选帧，并用 64-bit difference hash 与上一张保留帧比较，汉明距离不大于 6 时跳过。每个保留帧运行 DeepSeek-VL2 Tiny、YOLO26n 检测、YOLO11n-seg 分割和 YOLO11n-pose 姿态识别。
+
+```bash
+cd backend
+uv run python scripts/process_video_captions.py \
+  --source-dir /ds2/videos/DJI_20260626_railway \
+  --batch-name DJI_20260626_railway \
+  --frame-interval-seconds 2 \
+  --similar-hash-distance 6 \
+  --wait-for-vram
+```
+
+帧图片只保存一份于 `DATA_DIR/video_captions/<batch>/<video>/frames/`，同时以同一帧 ID 建立标注工作台图片资产；视频描述/多模型结果在 `railway_video_captions.video_caption_frame.result_json`，图片工作台对应任务和标注版本在 `railway_recognition`。视频工作台可分页查看描述与识别摘要，标注工作台“历史图片”可打开同一批抽帧并继续人工编辑。
 
 ## 目录结构
 
@@ -133,12 +151,15 @@ CORS_ORIGINS=http://localhost:4021,http://127.0.0.1:4021,http://47.120.48.245:14
 
 ```sql
 CREATE DATABASE railway_recognition;
+CREATE DATABASE railway_video_captions;
 ```
 
 本地 `.env` 配置：
 
 ```text
+DATA_DIR=/path/to/DS2/data/railway-recognition
 DATABASE_URL=postgresql+psycopg://deipss:<PASSWORD>@127.0.0.1:5432/railway_recognition
+VIDEO_DATABASE_URL=postgresql+psycopg://deipss:<PASSWORD>@127.0.0.1:5432/railway_video_captions
 TASK_WORKER_ENABLED=true
 TASK_POLL_INTERVAL_SECONDS=1
 ```
@@ -357,10 +378,10 @@ uv run pytest
 
 ### Database
 - Primary database: PostgreSQL.
-- Default database name: `railway_recognition`.
+- Default database names: `railway_recognition` (images, labels and tasks) and `railway_video_captions` (video frame index and descriptions).
 - Default database port: `5432`.
 - Default application URL: `postgresql+psycopg://deipss:<PASSWORD>@127.0.0.1:5432/railway_recognition`.
-- PostgreSQL stores assets, tasks, labels, annotation versions, and queue state. Tests may override `DATABASE_URL` with temporary SQLite URLs.
+- PostgreSQL stores assets, tasks, labels, annotation versions, and queue state; video-caption tables are in `railway_video_captions`. Image and frame binaries are stored under `DATA_DIR` in DS2. Tests may override `DATABASE_URL` with temporary SQLite URLs.
 
 ### Default Ports
 - Backend API: `8023` on the host in local docs; Compose maps host `8023` to container `8000`.

@@ -16,7 +16,7 @@ def get_store() -> PostgresStore:
 
 def get_storage_service() -> StorageService:
     settings = get_settings()
-    return StorageService(settings.upload_dir)
+    return StorageService(settings.upload_dir, settings.legacy_data_dir)
 
 
 def get_inference_service() -> InferenceService:

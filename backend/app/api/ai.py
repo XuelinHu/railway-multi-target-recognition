@@ -26,7 +26,8 @@ def infer_image_task(
         raise HTTPException(status_code=404, detail="当前图片不存在")
 
     session_id = request.session_id or image.session_id or "default"
-    task = store.create_or_get_image_task(request.image_id, request.task_type, session_id, current_user.user_id)
+    task_user_id = None if image.session_id.startswith("video-import:") else current_user.user_id
+    task = store.create_or_get_image_task(request.image_id, request.task_type, session_id, task_user_id)
     existing_result = store.get_image_task_result_by_task_id(task.task_id)
     if existing_result is not None and existing_result.review_status == "approved":
         raise HTTPException(status_code=409, detail="审核通过的任务已经锁定，不能重新执行模型")

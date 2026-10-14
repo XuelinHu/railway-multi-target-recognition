@@ -10,27 +10,41 @@ from app.services.storage_service import StorageService
 router = APIRouter(prefix="/api/assets", tags=["assets"])
 
 
-@router.post("/upload", response_model=Asset)
+@router.post("/upload", response_model=dict)
 def upload_asset(
     file: UploadFile = File(...),
     storage: StorageService = Depends(get_storage_service),
     store: PostgresStore = Depends(get_store),
-) -> Asset:
+) -> dict:
     asset = storage.save_upload(file)
-    return store.create_asset(asset)
+    return _public_asset(store.create_asset(asset))
 
 
-@router.get("", response_model=list[Asset])
-def list_assets(store: PostgresStore = Depends(get_store)) -> list[Asset]:
-    return store.list_assets()
+@router.get("", response_model=list[dict])
+def list_assets(store: PostgresStore = Depends(get_store)) -> list[dict]:
+    return [_public_asset(asset) for asset in store.list_assets()]
 
 
-@router.get("/{asset_id}", response_model=Asset)
-def get_asset(asset_id: str, store: PostgresStore = Depends(get_store)) -> Asset:
+@router.get("/{asset_id}", response_model=dict)
+def get_asset(asset_id: str, store: PostgresStore = Depends(get_store)) -> dict:
     asset = store.get_asset(asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail="asset not found")
-    return asset
+    return _public_asset(asset)
+
+
+def _public_asset(asset: Asset) -> dict:
+    public = {
+        "id": asset.id,
+        "filename": asset.filename,
+        "content_type": asset.content_type,
+        "type": asset.type,
+        "size_bytes": asset.size_bytes,
+        "created_at": asset.created_at,
+    }
+    if asset.type == "image":
+        public.update(width=asset.width, height=asset.height)
+    return public
 
 
 @router.get("/{asset_id}/frames/{frame_index}/image")

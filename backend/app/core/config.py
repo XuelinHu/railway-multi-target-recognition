@@ -8,7 +8,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "Railway Multi-Target Recognition API"
     data_dir: Path = Path("./data")
+    legacy_data_dir: Path = Path("./data")
+    model_search_dirs: str = "/ds1/workspace/ai/railway-multi-target-recognition/backend,/ds1/workspace/ai/railway-multi-target-recognition/backend/models,/ds1/workspace/ai/DS-OCR2-3090-Runner/models,/ds1/workspace/ai/OralSEAChinese/models"
     database_url: str = "postgresql+psycopg://deipss:CHANGE_ME@127.0.0.1:5432/railway_recognition"
+    video_database_url: str = ""
     inference_backend: str = Field(default="mock", pattern="^(mock|ultralytics|tensorrt)$")
     model_path: str = ""
     deepseek_vl2_model_path: str = "./models/deepseek-vl2-tiny"
@@ -51,6 +54,7 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
+    settings.legacy_data_dir.mkdir(parents=True, exist_ok=True)
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.tts_cache_dir.mkdir(parents=True, exist_ok=True)

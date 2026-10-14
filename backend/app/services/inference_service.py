@@ -19,6 +19,7 @@ MODEL_ALIASES = {
     "custom-railway-detector": "yolo11n.pt",
     "yolov8n": "yolov8n.pt",
     "yolo11n": "yolo11n.pt",
+    "yolo26n": "/ds1/workspace/ai/DS-OCR2-3090-Runner/models/railway-vision/yolo26n.pt",
     "yolo11n-seg": "yolo11n-seg.pt",
     "railway-seg-light": "yolo11n-seg.pt",
     "custom-segmentation": "yolo11n-seg.pt",
@@ -160,6 +161,19 @@ class InferenceService:
         path = Path(candidate)
         if path.is_absolute():
             return str(path)
+
+        model_candidates = (candidate, f"{candidate}.pt" if not Path(candidate).suffix else candidate)
+        for root_text in self.settings.model_search_dirs.split(","):
+            root = Path(root_text.strip()).expanduser()
+            if not root.is_dir():
+                continue
+            for model_candidate in model_candidates:
+                match = root / model_candidate
+                if match.is_file():
+                    return str(match)
+                matches = list(root.rglob(model_candidate))
+                if matches:
+                    return str(matches[0])
 
         local_path = Path(self.settings.data_dir).parent / candidate
         if local_path.exists():

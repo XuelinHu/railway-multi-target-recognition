@@ -23,6 +23,7 @@ MODEL_ALIASES: dict[str, str] = {
     "custom-railway-detector": "yolo11n.pt",
     "yolov8n": "yolov8n.pt",
     "yolo11n": "yolo11n.pt",
+    "yolo26n": "/ds1/workspace/ai/DS-OCR2-3090-Runner/models/railway-vision/yolo26n.pt",
     "yolo11n-seg": "yolo11n-seg.pt",
     "railway-seg-light": "yolo11n-seg.pt",
     "custom-segmentation": "yolo11n-seg.pt",
@@ -356,11 +357,28 @@ class VisionService:
     def _resolve_model(self, feature: VisionFeature, model_name: str | None) -> str:
         if model_name and model_name in MODEL_ALIASES:
             return MODEL_ALIASES[model_name]
+        if model_name:
+            local = self._find_local_model(model_name)
+            if local:
+                return str(local)
         if model_name and (model_name.endswith(".pt") or model_name.startswith("/")):
             return model_name
         if feature == "detection" and self.settings.model_path:
             return self.settings.model_path
         return DEFAULT_MODELS[feature]
+
+    def _find_local_model(self, model_name: str) -> Path | None:
+        candidates = (model_name, f"{model_name}.pt", f"{model_name}.engine")
+        roots = [Path(item.strip()).expanduser() for item in self.settings.model_search_dirs.split(",")]
+        for root in roots:
+            for candidate in candidates:
+                path = root / candidate
+                if path.is_file():
+                    return path
+                for match in root.rglob(candidate):
+                    if match.is_file():
+                        return match
+        return None
 
     def unload_models(self) -> None:
         """Drop every cached model and release its VRAM.

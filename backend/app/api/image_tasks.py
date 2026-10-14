@@ -33,7 +33,7 @@ def create_image_task(
         request.image_id,
         request.task_type,
         request.session_id or "default",
-        current_user.user_id,
+        None if image.session_id.startswith("video-import:") else current_user.user_id,
     )
     return ApiResponse(data=_task_payload(task))
 
@@ -73,7 +73,12 @@ def list_image_task_result_versions(
     current_user: AuthUser = Depends(require_user),
 ) -> ApiResponse:
     _require_image_access(store, image_id, current_user)
-    versions = store.list_image_task_result_versions(image_id, task_type, session_id or "default")
+    versions = store.list_image_task_result_versions(
+        image_id,
+        task_type,
+        session_id or "default",
+        None if current_user.role in {"reviewer", "admin"} else _task_user_id(store, image_id, current_user),
+    )
     return ApiResponse(data=[_version_payload(version) for version in versions])
 
 
@@ -118,7 +123,14 @@ def get_image_task_result(
     current_user: AuthUser = Depends(require_user),
 ) -> ApiResponse:
     _require_image_access(store, image_id, current_user)
-    result = store.get_image_task_result(image_id, task_type, session_id or "default")
+    image = store.get_image_asset(image_id)
+    result_user_id = None if image and image.session_id.startswith("video-import:") else current_user.user_id
+    result = store.get_image_task_result(
+        image_id,
+        task_type,
+        session_id or "default",
+        None if current_user.role in {"reviewer", "admin"} else result_user_id,
+    )
     if result is None:
         return ApiResponse(message="no result", data=None)
     return ApiResponse(data=_result_payload(result))
@@ -177,6 +189,18 @@ def _require_image_access(store: PostgresStore, image_id: str, current_user: Aut
     )
     if image is None:
         raise HTTPException(status_code=404, detail="当前图片不存在或无权访问")
+
+
+def _task_user_id(store: PostgresStore, image_id: str, current_user: AuthUser) -> str | None:
+    image = store.get_accessible_image_asset(image_id, current_user.user_id)
+    return None if image and image.session_id.startswith("video-import:") else current_user.user_id
+
+
+def _task_user_id(store: PostgresStore, image_id: str, current_user: AuthUser) -> str | None:
+    image = store.get_accessible_image_asset(image_id, current_user.user_id)
+    if image and image.session_id.startswith("video-import:"):
+        return None
+    return current_user.user_id
 
 
 def _require_edit_permission(current_user: AuthUser) -> None:

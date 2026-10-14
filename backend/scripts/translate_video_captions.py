@@ -108,21 +108,24 @@ def main() -> None:
 
             translations = _translate_chunk(client, args.ollama_url, args.model, chunk)
             if translations is None:
-                failed += len(chunk)
-                print(f"[chunk {chunk_count}] failed after {MAX_ATTEMPTS} attempts, skipped {len(chunk)} frame(s)", flush=True)
-            else:
-                for index, frame in enumerate(chunk, start=1):
-                    text = (translations.get(str(index)) or "").strip()
-                    if not text:
-                        failed += 1
-                        continue
-                    if store.update_video_caption_frame_description_en(frame.frame_id, text):
-                        translated += 1
-                print(
-                    f"[chunk {chunk_count}] {len(chunk)} frame(s) in {time.monotonic() - chunk_started:.1f}s "
-                    f"| done={translated} failed={failed}",
-                    flush=True,
-                )
+                translations = {}
+            chunk_translated = 0
+            for index, frame in enumerate(chunk, start=1):
+                translation = (translations.get(str(index)) or "").strip()
+                if not translation:
+                    single = _translate_chunk(client, args.ollama_url, args.model, [frame]) or {}
+                    translation = (single.get("1") or "").strip()
+                if not translation:
+                    failed += 1
+                    continue
+                if store.update_video_caption_frame_description_en(frame.frame_id, translation):
+                    translated += 1
+                    chunk_translated += 1
+            print(
+                f"[chunk {chunk_count}] {chunk_translated}/{len(chunk)} translated in "
+                f"{time.monotonic() - chunk_started:.1f}s | done={translated} failed={failed}",
+                flush=True,
+            )
 
             if chunk_count % 10 == 0:
                 elapsed = time.monotonic() - started

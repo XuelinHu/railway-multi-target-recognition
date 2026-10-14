@@ -1,4 +1,5 @@
 import io
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,6 +10,8 @@ from app.core.dependencies import get_store
 from app.main import create_app
 from app.api.ai import _result_from_analysis
 from app.models.schemas import VideoCaptionBatch, VideoCaptionFrame, VideoCaptionVideo
+from app.api import labels as labels_api
+from app.api import video_captions as video_caption_api
 
 
 def _register_student(client: TestClient, username: str = "student001") -> dict:
@@ -122,7 +125,9 @@ def test_video_upload_extracts_frames_and_detects(monkeypatch, tmp_path):
     assert upload.status_code == 200
     asset = upload.json()
     assert asset["type"] == "video"
-    assert asset["frame_count"] == 3
+    assert "path" not in asset
+    assert "frame_count" not in asset
+    assert "width" not in asset
 
     task_response = client.post(
         "/api/tasks/detect",
@@ -236,11 +241,114 @@ def test_image_history_defaults_to_all_backend_sessions(monkeypatch, tmp_path):
     assert all_history.status_code == 200
     assert all_history.json()["data"]["total"] == 2
     assert {item["sessionId"] for item in all_history.json()["data"]["records"]} == {"browser-a", "browser-b"}
-
     scoped_history = client.get("/api/images/list?taskType=detection&pageSize=200&sessionId=browser-a")
     assert scoped_history.status_code == 200
     assert scoped_history.json()["data"]["total"] == 1
     assert scoped_history.json()["data"]["records"][0]["sessionId"] == "browser-a"
+
+
+def test_video_import_annotation_results_are_visible_in_workspace(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'video_import_workspace.db'}")
+    monkeypatch.setenv("INFERENCE_BACKEND", "mock")
+    monkeypatch.setenv("TASK_WORKER_ENABLED", "false")
+    get_settings.cache_clear()
+    get_store.cache_clear()
+
+    client = TestClient(create_app())
+    _register_student(client)
+    store = get_store()
+    image_id = "video-frame-01"
+    image_path = tmp_path / "frame.jpg"
+    Image.new("RGB", (64, 48), "white").save(image_path)
+    from app.models.schemas import ImageAsset, ImageTaskResult
+
+    store.create_image_asset(
+        ImageAsset(
+            image_id=image_id,
+            original_name="train_frame_000001.jpg",
+            file_name=image_path.name,
+            file_url="/api/video-captions/frames/video-frame-01/image",
+            file_path=str(image_path),
+            mime_type="image/jpeg",
+            file_size=image_path.stat().st_size,
+            width=64,
+            height=48,
+            session_id="video-import:video-01",
+        )
+    )
+    task = store.create_or_get_image_task(image_id, "detection", "video-import:video-01", None)
+    store.save_image_task_result(
+        ImageTaskResult(
+            task_id=task.task_id,
+            image_id=image_id,
+            task_type="detection",
+            result_json={"boxes": [{"x": 1, "y": 2, "width": 10, "height": 8, "label": "train", "score": 0.9}]},
+            annotation_json={"shapes": []},
+            source="ai",
+            model_id="yolo26n",
+        )
+    )
+
+    history = client.get("/api/images/list?taskType=detection&pageSize=20")
+    assert history.status_code == 200
+    frame = next(row for row in history.json()["data"]["records"] if row["imageId"] == image_id)
+    assert frame["hasCurrentTaskResult"] is True
+    result = client.get(
+        f"/api/image-tasks/result?imageId={image_id}&taskType=detection&sessionId=video-import%3Avideo-01"
+    )
+    assert result.status_code == 200
+    assert result.json()["data"]["modelId"] == "yolo26n"
+    versions = client.get(
+        f"/api/image-tasks/result/versions?imageId={image_id}&taskType=detection&sessionId=video-import%3Avideo-01"
+    )
+    assert versions.status_code == 200
+    assert len(versions.json()["data"]) == 1
+
+
+def test_delete_image_removes_linked_results_and_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'image_delete.db'}")
+    monkeypatch.setenv("INFERENCE_BACKEND", "mock")
+    monkeypatch.setenv("TASK_WORKER_ENABLED", "false")
+    get_settings.cache_clear()
+    get_store.cache_clear()
+
+    client = TestClient(create_app())
+    _register_student(client)
+    image = Image.new("RGB", (48, 32), color="white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    uploaded = client.post(
+        "/api/images/upload",
+        data={"taskType": "detection", "sessionId": "delete-test"},
+        files={"file": ("delete.png", buffer.getvalue(), "image/png")},
+    )
+    assert uploaded.status_code == 200
+    image_data = uploaded.json()["data"]
+    image_id = image_data["imageId"]
+    file_path = Path(image_data["filePath"])
+    task = client.post(
+        "/api/image-tasks/create",
+        json={"imageId": image_id, "taskType": "detection", "sessionId": "delete-test"},
+    )
+    assert task.status_code == 200
+    saved = client.post(
+        "/api/image-tasks/result/save",
+        json={
+            "taskId": task.json()["data"]["taskId"],
+            "imageId": image_id,
+            "taskType": "detection",
+            "annotationJson": {"shapes": []},
+        },
+    )
+    assert saved.status_code == 200
+
+    deleted = client.delete(f"/api/images/{image_id}")
+    assert deleted.status_code == 200
+    assert not file_path.exists()
+    assert get_store().get_image_asset(image_id) is None
+    assert get_store().get_image_task_result(image_id, "detection", "delete-test") is None
 
 
 def test_login_session_persists_and_student_images_are_isolated(monkeypatch, tmp_path):
@@ -452,15 +560,134 @@ def test_video_caption_results_are_queryable(monkeypatch, tmp_path):
     assert batches.status_code == 200
     assert batches.json()["data"][0]["totalVideos"] == 1
     assert batches.json()["data"][0]["totalFrames"] == 1
+    assert "sourceDir" not in batches.json()["data"][0]
+    assert "metadata" not in batches.json()["data"][0]
 
     videos = client.get(f"/api/video-captions/batches/{batch.batch_id}/videos")
     assert videos.status_code == 200
     assert videos.json()["data"][0]["filename"] == "DJI_0001.MP4"
+    assert "sourcePath" not in videos.json()["data"][0]
+    assert "fps" not in videos.json()["data"][0]
 
     frames = client.get(f"/api/video-captions/videos/{video.video_id}/frames?query=人员")
     assert frames.status_code == 200
     assert frames.json()["data"]["records"][0]["frameId"] == frame.frame_id
+    assert "imagePath" not in frames.json()["data"]["records"][0]
 
     image_response = client.get(f"/api/video-captions/frames/{frame.frame_id}/image")
     assert image_response.status_code == 200
     assert image_response.headers["content-type"] == "image/jpeg"
+
+
+def test_video_frame_translation_manual_review_and_safety_score(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'frame_review.db'}")
+    monkeypatch.setenv("INFERENCE_BACKEND", "mock")
+    monkeypatch.setenv("TASK_WORKER_ENABLED", "false")
+    get_settings.cache_clear()
+    get_store.cache_clear()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"models": [{"name": "qwen3:4b"}], "message": {"content": "Railway workers inspect the track."}}
+
+    monkeypatch.setattr(video_caption_api.httpx, "get", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(video_caption_api.httpx, "post", lambda *args, **kwargs: FakeResponse())
+    client = TestClient(create_app())
+    _register_student(client)
+    store = get_store()
+    batch = store.create_or_update_video_caption_batch(VideoCaptionBatch(name="review", status="success"))
+    video = store.create_or_update_video_caption_video(
+        VideoCaptionVideo(batch_id=batch.batch_id, filename="video.mp4", source_path="/private/video.mp4", status="success")
+    )
+    frame = store.save_video_caption_frame(
+        VideoCaptionFrame(
+            batch_id=batch.batch_id,
+            video_id=video.video_id,
+            frame_index=0,
+            timestamp_ms=0,
+            image_path=str(tmp_path / "frame.jpg"),
+            description_text="铁路作业人员正在检查钢轨。",
+            status="success",
+        )
+    )
+
+    translated = client.post(f"/api/video-captions/frames/{frame.frame_id}/translate")
+    assert translated.status_code == 200
+    assert translated.json()["data"]["descriptionEn"] == "Railway workers inspect the track."
+
+    reviewed = client.put(
+        f"/api/video-captions/frames/{frame.frame_id}/review",
+        json={"descriptionManual": "人工修订：工作人员正在检查钢轨。", "safetyScore": 8},
+    )
+    assert reviewed.status_code == 200
+    assert reviewed.json()["data"]["descriptionManual"].startswith("人工修订")
+    assert reviewed.json()["data"]["safetyScore"] == 8
+
+
+def test_video_description_terms_are_searchable_and_paginated(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'terms.db'}")
+    monkeypatch.setenv("INFERENCE_BACKEND", "mock")
+    monkeypatch.setenv("TASK_WORKER_ENABLED", "false")
+    get_settings.cache_clear()
+    get_store.cache_clear()
+
+    client = TestClient(create_app())
+    _register_student(client)
+    store = get_store()
+    batch = store.create_or_update_video_caption_batch(VideoCaptionBatch(name="term-batch"))
+    video = store.create_or_update_video_caption_video(
+        VideoCaptionVideo(batch_id=batch.batch_id, filename="clip.mp4", source_path="/private/clip.mp4")
+    )
+    for index in range(2):
+        store.save_video_caption_frame(
+            VideoCaptionFrame(
+                batch_id=batch.batch_id,
+                video_id=video.video_id,
+                frame_index=index,
+                timestamp_ms=index * 1000,
+                image_path=str(tmp_path / f"{index}.jpg"),
+                description_text="施工人员检查接触网支柱和钢轨扣件。",
+            )
+        )
+
+    candidates = client.get("/api/labels/video-term-candidates?page=1&pageSize=10&query=钢轨")
+    assert candidates.status_code == 200
+    assert candidates.json()["data"]["total"] >= 1
+    assert candidates.json()["data"]["records"][0]["chineseName"] == "钢轨"
+
+    labels = client.get("/api/labels/search?page=1&pageSize=5&query=钢轨")
+    assert labels.status_code == 200
+    assert labels.json()["data"]["total"] == 0
+
+
+def test_label_search_and_online_thumbnail_fill(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'label_search.db'}")
+    monkeypatch.setenv("INFERENCE_BACKEND", "mock")
+    monkeypatch.setenv("TASK_WORKER_ENABLED", "false")
+    get_settings.cache_clear()
+    get_store.cache_clear()
+    monkeypatch.setattr(labels_api, "_search_commons_thumbnail", lambda label: f"https://thumb.example/{label.label_id}.jpg")
+
+    client = TestClient(create_app())
+    _register_student(client)
+    for english, chinese in (("rail_cable", "铁路电缆"), ("track_bolt", "钢轨螺栓")):
+        created = client.post("/api/labels", json={"englishName": english, "chineseName": chinese, "description": "铁路线路设施"})
+        assert created.status_code == 200
+
+    page = client.get("/api/labels/search?page=1&pageSize=1&query=铁路")
+    assert page.status_code == 200
+    assert page.json()["data"]["total"] == 2
+    assert len(page.json()["data"]["records"]) == 1
+
+    thumbnails = client.post("/api/labels/thumbnails/lookup")
+    assert thumbnails.status_code == 200
+    assert thumbnails.json()["data"]["searched"] == 2
+    assert thumbnails.json()["data"]["found"] == 2
+    refreshed = client.get("/api/labels/search?page=1&pageSize=5&query=铁路")
+    assert all(item["thumbnailUrl"].startswith("https://thumb.example/") for item in refreshed.json()["data"]["records"])

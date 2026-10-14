@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from app.models.schemas import (
@@ -160,6 +161,7 @@ class LabelConfigRecord(Base):
     english_name: Mapped[str] = mapped_column(String(120), index=True)
     chinese_name: Mapped[str] = mapped_column(String(120), index=True)
     description: Mapped[str] = mapped_column(Text, default="")
+    thumbnail_url: Mapped[str] = mapped_column(String(1000), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
@@ -200,6 +202,7 @@ class VideoCaptionVideoRecord(Base):
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     frame_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    similar_frames_skipped: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -223,6 +226,8 @@ class VideoCaptionFrameRecord(Base):
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     description_text: Mapped[str] = mapped_column(Text, default="")
     description_en: Mapped[str] = mapped_column(Text, default="")
+    description_manual: Mapped[str] = mapped_column(Text, default="")
+    safety_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     model_id: Mapped[str] = mapped_column(String(160), default="")
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     error: Mapped[str] = mapped_column(Text, default="")
@@ -238,9 +243,27 @@ class PostgresStore:
         self.session_factory = sessionmaker(self.engine, expire_on_commit=False)
         Base.metadata.create_all(self.engine)
         self._ensure_label_config_schema(database_url)
-        self._ensure_video_caption_schema(database_url)
         self._ensure_image_task_review_schema(database_url)
         self._ensure_admin_user()
+        self._seed_railway_labels(database_url)
+        from app.core.config import get_settings
+
+        video_database_url = get_settings().video_database_url
+        if not video_database_url and database_url.startswith("postgresql"):
+            video_database_url = make_url(database_url).set(database="railway_video_captions").render_as_string(hide_password=False)
+        video_database_url = video_database_url or database_url
+        if video_database_url == database_url:
+            self.video_engine = self.engine
+            self.video_session_factory = self.session_factory
+        else:
+            self.video_engine = create_engine(video_database_url, pool_pre_ping=True)
+            self.video_session_factory = sessionmaker(self.video_engine, expire_on_commit=False)
+            Base.metadata.create_all(
+                self.video_engine,
+                tables=[VideoCaptionBatchRecord.__table__, VideoCaptionVideoRecord.__table__, VideoCaptionFrameRecord.__table__],
+            )
+        self._ensure_video_caption_schema(video_database_url, self.video_engine)
+        self._ensure_railway_labels_schema(database_url)
 
     def create_asset(self, asset: Asset) -> Asset:
         with self.session_factory.begin() as session:
@@ -431,6 +454,45 @@ class PostgresStore:
             )
             return self._image_asset_from_record(record) if record else None
 
+    def delete_image_asset(self, image_id: str) -> list[str]:
+        with self.session_factory.begin() as session:
+            image = session.get(ImageAssetRecord, image_id)
+            legacy_asset = session.get(AssetRecord, image_id)
+            if image is None and legacy_asset is None:
+                return []
+            paths = [image.file_path] if image is not None else []
+            if legacy_asset is not None:
+                legacy_path = (legacy_asset.payload or {}).get("path")
+                if legacy_path:
+                    paths.append(legacy_path)
+                annotation = session.get(AnnotationRecord, image_id)
+                if annotation is not None:
+                    session.delete(annotation)
+                legacy_tasks = session.scalars(select(TaskRecord).where(TaskRecord.asset_id == image_id)).all()
+                for task in legacy_tasks:
+                    session.delete(task)
+                session.delete(legacy_asset)
+            tasks = session.scalars(select(ImageTaskRecord).where(ImageTaskRecord.image_id == image_id)).all()
+            task_ids = [task.id for task in tasks]
+            if task_ids:
+                results = session.scalars(select(ImageTaskResultRecord).where(ImageTaskResultRecord.task_id.in_(task_ids))).all()
+                for result in results:
+                    if result.result_image_path:
+                        paths.append(result.result_image_path)
+                versions = session.scalars(
+                    select(ImageTaskResultVersionRecord).where(ImageTaskResultVersionRecord.task_id.in_(task_ids))
+                ).all()
+                for version in versions:
+                    if version.result_image_path:
+                        paths.append(version.result_image_path)
+                    session.delete(version)
+                for result in results:
+                    session.delete(result)
+                for task in tasks:
+                    session.delete(task)
+            session.delete(image)
+            return paths
+
     def list_image_assets(
         self,
         task_type: ImageTaskType | None = None,
@@ -456,8 +518,9 @@ class PostgresStore:
             images = [self._image_asset_from_record(record) for record in records]
             if task_type:
                 for image in images:
-                    task = self.get_image_task(image.image_id, task_type, image.session_id)
-                    result = self.get_image_task_result(image.image_id, task_type, image.session_id)
+                    task_user_id = None if image.session_id.startswith("video-import:") else image.user_id
+                    task = self.get_image_task(image.image_id, task_type, image.session_id, task_user_id)
+                    result = self.get_image_task_result(image.image_id, task_type, image.session_id, task_user_id)
                     image.task_status = task.status if task else "idle"
                     image.has_current_task_result = result is not None
             return images, int(total or 0)
@@ -497,6 +560,7 @@ class PostgresStore:
         image_id: str,
         task_type: ImageTaskType,
         session_id: str = "default",
+        user_id: str | None = None,
     ) -> ImageTask | None:
         with self.session_factory() as session:
             record = session.scalar(
@@ -504,6 +568,7 @@ class PostgresStore:
                     ImageTaskRecord.image_id == image_id,
                     ImageTaskRecord.task_type == task_type,
                     ImageTaskRecord.session_id == session_id,
+                    ImageTaskRecord.user_key == (user_id or ""),
                 )
             )
             return self._image_task_from_record(record) if record else None
@@ -556,6 +621,7 @@ class PostgresStore:
         image_id: str,
         task_type: ImageTaskType,
         session_id: str = "default",
+        user_id: str | None = None,
     ) -> ImageTaskResult | None:
         with self.session_factory() as session:
             task = session.scalar(
@@ -563,6 +629,7 @@ class PostgresStore:
                     ImageTaskRecord.image_id == image_id,
                     ImageTaskRecord.task_type == task_type,
                     ImageTaskRecord.session_id == session_id,
+                    *([ImageTaskRecord.user_key == (user_id or "")] if user_id is not None else []),
                 )
             )
             if not task:
@@ -633,6 +700,7 @@ class PostgresStore:
         image_id: str,
         task_type: ImageTaskType,
         session_id: str = "default",
+        user_id: str | None = None,
     ) -> list[ImageTaskResultVersion]:
         with self.session_factory() as session:
             task = session.scalar(
@@ -640,6 +708,7 @@ class PostgresStore:
                     ImageTaskRecord.image_id == image_id,
                     ImageTaskRecord.task_type == task_type,
                     ImageTaskRecord.session_id == session_id,
+                    *([ImageTaskRecord.user_key == (user_id or "")] if user_id is not None else []),
                 )
             )
             if task is None:
@@ -678,6 +747,41 @@ class PostgresStore:
         with self.session_factory() as session:
             records = session.scalars(select(LabelConfigRecord).order_by(LabelConfigRecord.label_id.asc())).all()
             return [self._label_config_from_record(record) for record in records]
+
+    def list_label_configs_page(self, page: int = 1, page_size: int = 20, query: str = "") -> tuple[list[LabelConfig], int]:
+        offset = (page - 1) * page_size
+        with self.session_factory() as session:
+            statement = select(LabelConfigRecord)
+            count_statement = select(func.count()).select_from(LabelConfigRecord)
+            if query:
+                pattern = f"%{query}%"
+                condition = or_(
+                    LabelConfigRecord.chinese_name.ilike(pattern),
+                    LabelConfigRecord.english_name.ilike(pattern),
+                    LabelConfigRecord.description.ilike(pattern),
+                )
+                statement = statement.where(condition)
+                count_statement = count_statement.where(condition)
+            records = session.scalars(statement.order_by(LabelConfigRecord.label_id.asc()).offset(offset).limit(page_size)).all()
+            total = session.scalar(count_statement) or 0
+            return [self._label_config_from_record(record) for record in records], int(total)
+
+    def list_video_caption_descriptions(self) -> list[str]:
+        with self.video_session_factory() as session:
+            return list(session.scalars(
+                select(VideoCaptionFrameRecord.description_text)
+                .where(VideoCaptionFrameRecord.description_text != "")
+            ).all())
+
+    def update_label_thumbnail(self, label_id: int, thumbnail_url: str) -> LabelConfig | None:
+        with self.session_factory.begin() as session:
+            record = session.get(LabelConfigRecord, label_id)
+            if record is None:
+                return None
+            record.thumbnail_url = thumbnail_url
+            record.updated_at = now_utc()
+            session.flush()
+            return self._label_config_from_record(record)
 
     def create_label_config(
         self,
@@ -719,6 +823,7 @@ class PostgresStore:
                 english_name=template.english_name,
                 chinese_name=template.chinese_name,
                 description=template.description,
+                thumbnail_url=template.thumbnail_url,
                 created_at=now,
                 updated_at=now,
             )
@@ -753,7 +858,7 @@ class PostgresStore:
             return True
 
     def create_or_update_video_caption_batch(self, batch: VideoCaptionBatch) -> VideoCaptionBatch:
-        with self.session_factory.begin() as session:
+        with self.video_session_factory.begin() as session:
             record = session.scalar(select(VideoCaptionBatchRecord).where(VideoCaptionBatchRecord.name == batch.name))
             if record is None:
                 record = self._video_caption_batch_record(batch)
@@ -774,7 +879,7 @@ class PostgresStore:
             return self._video_caption_batch_from_record(record)
 
     def update_video_caption_batch_counts(self, batch_id: str, status: str | None = None) -> VideoCaptionBatch | None:
-        with self.session_factory.begin() as session:
+        with self.video_session_factory.begin() as session:
             record = session.get(VideoCaptionBatchRecord, batch_id)
             if record is None:
                 return None
@@ -793,17 +898,17 @@ class PostgresStore:
             return self._video_caption_batch_from_record(record)
 
     def list_video_caption_batches(self) -> list[VideoCaptionBatch]:
-        with self.session_factory() as session:
+        with self.video_session_factory() as session:
             records = session.scalars(select(VideoCaptionBatchRecord).order_by(VideoCaptionBatchRecord.updated_at.desc())).all()
             return [self._video_caption_batch_from_record(record) for record in records]
 
     def get_video_caption_batch(self, batch_id: str) -> VideoCaptionBatch | None:
-        with self.session_factory() as session:
+        with self.video_session_factory() as session:
             record = session.get(VideoCaptionBatchRecord, batch_id)
             return self._video_caption_batch_from_record(record) if record else None
 
     def create_or_update_video_caption_video(self, video: VideoCaptionVideo) -> VideoCaptionVideo:
-        with self.session_factory.begin() as session:
+        with self.video_session_factory.begin() as session:
             record = session.scalar(
                 select(VideoCaptionVideoRecord).where(
                     VideoCaptionVideoRecord.batch_id == video.batch_id,
@@ -825,6 +930,7 @@ class PostgresStore:
                 record.height = video.height
                 record.frame_count = video.frame_count
                 record.duration_ms = video.duration_ms
+                record.similar_frames_skipped = video.similar_frames_skipped
                 record.status = video.status
                 record.error = video.error
                 record.updated_at = now_utc()
@@ -838,7 +944,7 @@ class PostgresStore:
         display_name: str,
         keywords: list[str],
     ) -> VideoCaptionVideo | None:
-        with self.session_factory.begin() as session:
+        with self.video_session_factory.begin() as session:
             record = session.get(VideoCaptionVideoRecord, video_id)
             if record is None:
                 return None
@@ -849,7 +955,7 @@ class PostgresStore:
             return self._video_caption_video_from_record(record)
 
     def list_video_caption_videos(self, batch_id: str) -> list[VideoCaptionVideo]:
-        with self.session_factory() as session:
+        with self.video_session_factory() as session:
             records = session.scalars(
                 select(VideoCaptionVideoRecord)
                 .where(VideoCaptionVideoRecord.batch_id == batch_id)
@@ -858,12 +964,12 @@ class PostgresStore:
             return [self._video_caption_video_from_record(record) for record in records]
 
     def get_video_caption_video(self, video_id: str) -> VideoCaptionVideo | None:
-        with self.session_factory() as session:
+        with self.video_session_factory() as session:
             record = session.get(VideoCaptionVideoRecord, video_id)
             return self._video_caption_video_from_record(record) if record else None
 
     def save_video_caption_frame(self, frame: VideoCaptionFrame) -> VideoCaptionFrame:
-        with self.session_factory.begin() as session:
+        with self.video_session_factory.begin() as session:
             record = session.scalar(
                 select(VideoCaptionFrameRecord).where(
                     VideoCaptionFrameRecord.video_id == frame.video_id,
@@ -894,7 +1000,7 @@ class PostgresStore:
             return self._video_caption_frame_from_record(record)
 
     def update_video_caption_frame_description_en(self, frame_id: str, description_en: str) -> bool:
-        with self.session_factory.begin() as session:
+        with self.video_session_factory.begin() as session:
             record = session.get(VideoCaptionFrameRecord, frame_id)
             if record is None:
                 return False
@@ -902,8 +1008,34 @@ class PostgresStore:
             record.updated_at = now_utc()
             return True
 
+    def update_video_caption_frame_review(
+        self,
+        frame_id: str,
+        description_manual: str,
+        safety_score: int | None,
+    ) -> VideoCaptionFrame | None:
+        with self.video_session_factory.begin() as session:
+            record = session.get(VideoCaptionFrameRecord, frame_id)
+            if record is None:
+                return None
+            record.description_manual = description_manual.strip()
+            record.safety_score = safety_score
+            record.updated_at = now_utc()
+            session.flush()
+            return self._video_caption_frame_from_record(record)
+
+    def update_video_caption_frame_translation(self, frame_id: str, description_en: str) -> VideoCaptionFrame | None:
+        with self.video_session_factory.begin() as session:
+            record = session.get(VideoCaptionFrameRecord, frame_id)
+            if record is None:
+                return None
+            record.description_en = description_en.strip()
+            record.updated_at = now_utc()
+            session.flush()
+            return self._video_caption_frame_from_record(record)
+
     def list_video_caption_frames_missing_english(self, video_id: str) -> list[VideoCaptionFrame]:
-        with self.session_factory() as session:
+        with self.video_session_factory() as session:
             records = session.scalars(
                 select(VideoCaptionFrameRecord)
                 .where(
@@ -915,17 +1047,17 @@ class PostgresStore:
                         VideoCaptionFrameRecord.description_en == "",
                     ),
                 )
-                .order_by(VideoCaptionFrameRecord.frame_index.asc())
+                .order_by(VideoCaptionFrameRecord.timestamp_ms.asc(), VideoCaptionFrameRecord.frame_index.asc())
             ).all()
             return [self._video_caption_frame_from_record(record) for record in records]
 
     def get_video_caption_frame(self, frame_id: str) -> VideoCaptionFrame | None:
-        with self.session_factory() as session:
+        with self.video_session_factory() as session:
             record = session.get(VideoCaptionFrameRecord, frame_id)
             return self._video_caption_frame_from_record(record) if record else None
 
     def get_video_caption_frame_by_index(self, video_id: str, frame_index: int) -> VideoCaptionFrame | None:
-        with self.session_factory() as session:
+        with self.video_session_factory() as session:
             record = session.scalar(
                 select(VideoCaptionFrameRecord).where(
                     VideoCaptionFrameRecord.video_id == video_id,
@@ -942,7 +1074,7 @@ class PostgresStore:
         query: str = "",
     ) -> tuple[list[VideoCaptionFrame], int]:
         offset = max(page - 1, 0) * page_size
-        with self.session_factory() as session:
+        with self.video_session_factory() as session:
             statement = select(VideoCaptionFrameRecord).where(VideoCaptionFrameRecord.video_id == video_id)
             count_statement = select(func.count()).select_from(VideoCaptionFrameRecord).where(VideoCaptionFrameRecord.video_id == video_id)
             if query:
@@ -955,17 +1087,25 @@ class PostgresStore:
                 statement = statement.where(condition)
                 count_statement = count_statement.where(condition)
             records = session.scalars(
-                statement.order_by(VideoCaptionFrameRecord.frame_index.asc()).offset(offset).limit(page_size)
+                statement.order_by(VideoCaptionFrameRecord.timestamp_ms.asc(), VideoCaptionFrameRecord.frame_index.asc())
+                .offset(offset)
+                .limit(page_size)
             ).all()
             total = session.scalar(count_statement)
             return [self._video_caption_frame_from_record(record) for record in records], int(total or 0)
 
     def close(self) -> None:
         self.engine.dispose()
+        if self.video_engine is not self.engine:
+            self.video_engine.dispose()
 
     def healthcheck(self) -> bool:
         with self.engine.connect() as connection:
-            return connection.execute(text("SELECT 1")).scalar_one() == 1
+            primary_ok = connection.execute(text("SELECT 1")).scalar_one() == 1
+        if self.video_engine is self.engine:
+            return primary_ok
+        with self.video_engine.connect() as connection:
+            return primary_ok and connection.execute(text("SELECT 1")).scalar_one() == 1
 
     def _ensure_label_config_schema(self, database_url: str) -> None:
         if not database_url.startswith("postgresql"):
@@ -973,14 +1113,18 @@ class PostgresStore:
         with self.engine.begin() as connection:
             connection.execute(text("ALTER TABLE label_config DROP CONSTRAINT IF EXISTS label_config_english_name_key"))
             connection.execute(text("DROP INDEX IF EXISTS ix_label_config_english_name"))
+            connection.execute(text("ALTER TABLE label_config ADD COLUMN IF NOT EXISTS thumbnail_url VARCHAR(1000) DEFAULT ''"))
 
-    def _ensure_video_caption_schema(self, database_url: str) -> None:
+    def _ensure_video_caption_schema(self, database_url: str, engine=None) -> None:
         if not database_url.startswith("postgresql"):
             return
-        with self.engine.begin() as connection:
+        with (engine or self.engine).begin() as connection:
             connection.execute(text("ALTER TABLE video_caption_video ADD COLUMN IF NOT EXISTS display_name VARCHAR(500) DEFAULT ''"))
             connection.execute(text("ALTER TABLE video_caption_video ADD COLUMN IF NOT EXISTS keywords_json JSON DEFAULT '[]'::json"))
             connection.execute(text("ALTER TABLE video_caption_frame ADD COLUMN IF NOT EXISTS description_en TEXT DEFAULT ''"))
+            connection.execute(text("ALTER TABLE video_caption_frame ADD COLUMN IF NOT EXISTS description_manual TEXT DEFAULT ''"))
+            connection.execute(text("ALTER TABLE video_caption_frame ADD COLUMN IF NOT EXISTS safety_score INTEGER"))
+            connection.execute(text("ALTER TABLE video_caption_video ADD COLUMN IF NOT EXISTS similar_frames_skipped INTEGER DEFAULT 0"))
 
     def _ensure_image_task_review_schema(self, database_url: str) -> None:
         if not database_url.startswith("postgresql"):
@@ -993,6 +1137,12 @@ class PostgresStore:
             connection.execute(text("ALTER TABLE image_task_result ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ"))
             connection.execute(text("ALTER TABLE image_task_result ADD COLUMN IF NOT EXISTS review_comment TEXT DEFAULT ''"))
 
+    def _ensure_railway_labels_schema(self, database_url: str) -> None:
+        if not database_url.startswith("postgresql"):
+            return
+        with self.engine.begin() as connection:
+            connection.execute(text("ALTER TABLE label_config DROP CONSTRAINT IF EXISTS label_config_english_name_key"))
+
     def _ensure_admin_user(self) -> None:
         with self.session_factory.begin() as session:
             has_admin = session.scalar(select(func.count()).select_from(UserRecord).where(UserRecord.role == "admin")) or 0
@@ -1002,6 +1152,59 @@ class PostgresStore:
             if first_user is not None:
                 first_user.role = "admin"
                 first_user.updated_at = now_utc()
+
+    def _seed_railway_labels(self, database_url: str) -> None:
+        if not database_url.startswith("postgresql"):
+            return
+        presets = [
+            ("rail", "钢轨", "基本轨、尖轨、导轨及钢轨表面缺陷"),
+            ("track", "轨道", "线路、轨枕和道床范围"),
+            ("sleeper", "轨枕", "混凝土或木质轨枕"),
+            ("ballast", "道砟", "道床碎石及缺失、污染区域"),
+            ("fastener", "扣件", "弹条、螺栓、垫板等扣件组件"),
+            ("rail_joint", "钢轨接头", "接头、夹板及连接螺栓"),
+            ("switch", "道岔", "转辙器、尖轨、辙叉及连接杆"),
+            ("crossing", "平交道口", "铁路与道路平交区域及设施"),
+            ("platform", "站台", "站台边缘、屏蔽门及候车区域"),
+            ("railway_vehicle", "铁路车辆", "机车、客车、货车及轨道工程车辆"),
+            ("train", "列车", "完整列车或列车编组"),
+            ("railway_worker", "铁路工作人员", "巡检、维修、调度和施工人员"),
+            ("passenger", "乘客", "站台及车厢内乘客"),
+            ("helmet", "安全帽", "人员头部安全防护用品"),
+            ("safety_vest", "反光背心", "铁路作业反光防护服"),
+            ("signal", "铁路信号", "信号机、信号灯及显示状态"),
+            ("railway_sign", "铁路标志", "里程、限速、警示和线路标志"),
+            ("catenary", "接触网", "接触线、承力索、吊弦及支柱"),
+            ("pantograph", "受电弓", "机车或动车组受电弓及其状态"),
+            ("overhead_line", "架空线", "铁路供电及通信架空线路"),
+            ("obstacle", "侵限障碍物", "进入线路限界的异物或障碍物"),
+            ("crack", "裂纹", "钢轨、轨枕、构件表面裂纹"),
+            ("wear", "磨耗", "钢轨及铁路构件异常磨损"),
+            ("corrosion", "锈蚀", "钢轨、扣件及金属构件腐蚀"),
+            ("deformation", "变形", "轨道几何或构件异常弯曲、扭曲"),
+            ("missing_fastener", "扣件缺失", "扣件组件缺失或脱落"),
+            ("loose_fastener", "扣件松动", "扣件未紧固或位置异常"),
+            ("water", "积水", "线路、隧道或站场积水"),
+            ("smoke", "烟雾", "列车、隧道或设施异常烟雾"),
+            ("fire", "火情", "明火或疑似燃烧区域"),
+            ("animal", "动物", "进入铁路线路区域的动物"),
+        ]
+        with self.session_factory.begin() as session:
+            existing = set(session.scalars(select(LabelConfigRecord.english_name)).all())
+            next_id = int(session.scalar(select(func.coalesce(func.max(LabelConfigRecord.label_id), -1) + 1)) or 0)
+            now = now_utc()
+            for english_name, chinese_name, description in presets:
+                if english_name in existing:
+                    continue
+                session.add(LabelConfigRecord(
+                    label_id=next_id,
+                    english_name=english_name,
+                    chinese_name=chinese_name,
+                    description=description,
+                    created_at=now,
+                    updated_at=now,
+                ))
+                next_id += 1
 
     def _task_record(self, task: DetectTask) -> TaskRecord:
         return TaskRecord(
@@ -1121,6 +1324,8 @@ class PostgresStore:
             updated_at=record.updated_at,
             latest_version_id=latest.version_id if latest else None,
             latest_version_no=latest.version_no if latest else None,
+            source=latest.source if latest else "ai",
+            model_id=latest.model_id if latest else "",
             review_status=record.review_status or "draft",
             submitted_by=record.submitted_by,
             submitted_at=record.submitted_at,
@@ -1187,6 +1392,7 @@ class PostgresStore:
             english_name=record.english_name,
             chinese_name=record.chinese_name,
             description=record.description,
+            thumbnail_url=record.thumbnail_url or "",
             created_at=record.created_at,
             updated_at=record.updated_at,
         )
@@ -1239,6 +1445,7 @@ class PostgresStore:
             height=video.height,
             frame_count=video.frame_count,
             duration_ms=video.duration_ms,
+            similar_frames_skipped=video.similar_frames_skipped,
             status=video.status,
             error=video.error,
             created_at=video.created_at,
@@ -1259,6 +1466,7 @@ class PostgresStore:
             height=record.height,
             frame_count=record.frame_count,
             duration_ms=record.duration_ms,
+            similar_frames_skipped=record.similar_frames_skipped or 0,
             status=record.status,
             error=record.error,
             created_at=record.created_at,
@@ -1299,6 +1507,8 @@ class PostgresStore:
             height=record.height,
             description_text=record.description_text,
             description_en=record.description_en or "",
+            description_manual=record.description_manual or "",
+            safety_score=record.safety_score,
             model_id=record.model_id,
             status=record.status,
             error=record.error,
