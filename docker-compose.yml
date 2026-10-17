@@ -1,0 +1,68 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: railway-recognition-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: railway_recognition
+      POSTGRES_USER: deipss
+      POSTGRES_PASSWORD: Java@c1024
+    ports:
+      - "5432:5432"
+    volumes:
+      - railway_recognition_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deipss -d railway_recognition"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    image: python:3.11-slim
+    restart: unless-stopped
+    working_dir: /app/backend
+    command: >
+      sh -c "pip install --no-cache-dir fastapi pydantic-settings python-multipart pillow \"psycopg[binary]\" sqlalchemy \"uvicorn[standard]\" httpx jieba &&
+             PYTHONPATH=/app/backend uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      DATA_DIR: /ds2/data/railway-recognition
+      DATABASE_URL: postgresql+psycopg://deipss:Java%40c1024@postgres:5432/railway_recognition
+      VIDEO_DATABASE_URL: postgresql+psycopg://deipss:Java%40c1024@postgres:5432/railway_recognition
+      MODEL_SEARCH_DIRS: /app/models/railway-recognition
+      MODEL_PATH: /app/models/railway-recognition/yolo11n.pt
+      INFERENCE_BACKEND: mock
+      DEVICE: cpu
+      TASK_WORKER_ENABLED: "true"
+      RUN_TASKS_INLINE: "false"
+      CORS_ORIGINS: http://localhost:4021,http://127.0.0.1:4021
+    ports:
+      - "8023:8000"
+    volumes:
+      - .:/app
+      - /ds2/data/railway-recognition:/ds2/data/railway-recognition
+      - /ds2/models/railway-recognition:/app/models/railway-recognition:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    image: node:24
+    restart: unless-stopped
+    working_dir: /app/frontend
+    command: >
+      sh -c "npm install &&
+             npm run dev -- --host 0.0.0.0 --port 4004"
+    environment:
+      VITE_API_BASE_URL: ""
+      VITE_PROXY_TARGET: http://host.docker.internal:8023
+    ports:
+      - "4021:4004"
+    volumes:
+      - .:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - backend
+
+volumes:
+  railway_recognition_pgdata:

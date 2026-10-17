@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: railway-recognition-backend
+Version: 0.1.0
+Summary: FastAPI backend for railway multi-target recognition and annotation review.
+Requires-Python: >=3.11
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: huggingface-hub>=0.26.0
+Requires-Dist: pydantic-settings>=2.6.0
+Requires-Dist: python-multipart>=0.0.12
+Requires-Dist: pillow>=10.4.0
+Requires-Dist: opencv-python-headless>=4.10.0
+Requires-Dist: psycopg[binary]>=3.2.0
+Requires-Dist: sqlalchemy>=2.0.36
+Requires-Dist: socksio>=1.0.0
+Requires-Dist: transformers==4.38.2
+Requires-Dist: uvicorn[standard]>=0.32.0
+Requires-Dist: ultralytics>=8.4.70
+Requires-Dist: piper-tts>=1.8.0
+Requires-Dist: httpx>=0.28.1
+Requires-Dist: jieba>=0.42.1

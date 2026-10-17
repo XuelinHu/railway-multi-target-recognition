@@ -1,0 +1,23 @@
+{
+  "name": "railway-recognition-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@lucide/vue": "^1.17.0",
+    "@mediapipe/tasks-vision": "^0.10.22-rc.20250304",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "dompurify": "^3.4.17",
+    "marked": "^18.1.1",
+    "vite": "^7.2.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}
