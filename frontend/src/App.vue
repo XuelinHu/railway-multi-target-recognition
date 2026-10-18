@@ -102,7 +102,7 @@ import {
 } from "./api";
 
 type PageMode = "workspace" | "videoCaptions" | "chat" | "liveGesture" | "settings" | "training";
-type AnnotationTool = "select" | "pan" | "box" | "polygon" | "line" | "brush";
+type AnnotationTool = "select" | "pan" | "box" | "polygon" | "line" | "brush" | "pose-point";
 type ShapeType = "box" | "polygon" | "line" | "brush";
 type ResizeSide = "history" | "thumbnail";
 type AuthMode = "login" | "register";
@@ -159,7 +159,6 @@ const taskConfigs: TaskConfig[] = [
   { type: "detection", title: "目标检测", description: "检测框、类别与置信度", models: [] },
   { type: "segmentation", title: "实例分割", description: "区域掩码、轮廓与类别", models: [] },
   { type: "pose", title: "姿态识别", description: "关键点与骨架连线", models: [] },
-  { type: "classification", title: "图像分类", description: "分类标签与概率", models: [] },
   {
     type: "caption",
     title: "图像描述",
@@ -244,12 +243,15 @@ const polygonDraft = ref<Point[]>([]);
 const drawing = reactive({ active: false, mode: "" as "" | "draw" | "move" | "resize", shapeId: "", start: null as Point | null });
 const poseDraggingName = ref("");
 const selectedPosePointName = ref("");
+const poseDrawingPerson = ref<number | null>(null);
+const poseDrawingIndex = ref(0);
 
 const labelForm = reactive({
   englishName: "",
   chineseName: "",
   description: "",
 });
+const workspaceLabelFormOpen = ref(false);
 const editingLabelId = ref<number | null>(null);
 const editingLabel = reactive({ englishName: "", chineseName: "", description: "" });
 const currentUser = ref<AuthUser | null>(null);
@@ -259,6 +261,18 @@ const authForm = reactive({ username: "", displayName: "", password: "" });
 const users = ref<AuthUser[]>([]);
 const trainingType = ref<TrainingTaskType>("detection");
 const trainingImages = ref<TrainingImage[]>([]);
+const trainingValImages = ref<TrainingImage[]>([]);
+const trainingImageTotal = ref(0);
+const trainingValImageTotal = ref(0);
+const trainingImagePage = ref(1);
+const trainingValImagePage = ref(1);
+const trainingImagePageSize = 30;
+const trainingImageQuery = ref("");
+const trainingImageShuffle = ref(false);
+const trainingValImageShuffle = ref(false);
+const trainingImageDetail = ref<TrainingImage | null>(null);
+const trainingMetricDetail = ref<{ task: TrainingTask; metrics: TrainingMetric[] } | null>(null);
+const trainingMetricHover = ref<number | null>(null);
 const trainingTasks = ref<TrainingTask[]>([]);
 const selectedTrainIds = ref<string[]>([]);
 const selectedValIds = ref<string[]>([]);
@@ -280,7 +294,7 @@ const lightboxStageEl = ref<HTMLElement | null>(null);
 const frameZoomTarget = computed(() => lightboxStageEl.value);
 const frameView = reactive({ zoom: 1, x: 0, y: 0, dragging: false, startX: 0, startY: 0, originX: 0, originY: 0 });
 const lightboxFrameId = ref("");
-const lightboxTaskType = ref<"detection" | "segmentation" | "pose">("detection");
+const lightboxTaskType = ref<"detection" | "segmentation" | "pose" | "original">("detection");
 const manualFrameDescription = ref("");
 const frameSafetyScore = ref<number | null>(null);
 const frameReviewBusy = ref(false);
@@ -388,11 +402,23 @@ function persistUiLanguage() {
 function labelDisplay(label: Pick<LabelConfig, "englishName" | "chineseName">) {
   return uiLanguage.value === "zh" ? label.chineseName : label.englishName;
 }
+const detectionLabelZh: Record<string, string> = {
+  person: "人员", train: "列车", car: "车辆", truck: "卡车", bus: "公交车", traffic: "交通设施",
+  "traffic light": "信号灯", refrigerator: "铁路设备", chair: "座椅", bench: "站台座椅", oven: "设备",
+  "dining table": "作业台", tv: "显示屏", bottle: "瓶体", backpack: "背包", suitcase: "工具箱",
+  "fire hydrant": "消防栓", bicycle: "自行车", motorcycle: "摩托车",
+};
+function detectionLabelDisplay(value: unknown) {
+  const raw = String(value ?? "目标");
+  if (uiLanguage.value !== "zh") return raw;
+  const configured = labels.value.find((item) => item.englishName === raw || item.chineseName === raw);
+  return configured?.chineseName ?? detectionLabelZh[raw.toLowerCase()] ?? raw;
+}
 function shapeDisplayLabel(shape: AnnotationShape) {
   const label = labels.value.find((item) => item.labelId === shape.labelId)
     ?? labels.value.find((item) => item.englishName === shape.label || item.chineseName === shape.label);
   if (label) return labelDisplay(label);
-  return uiLanguage.value === "zh" ? shape.label.split(" / ").at(-1) ?? shape.label : shape.label.split(" / ")[0];
+  return detectionLabelDisplay(uiLanguage.value === "zh" ? shape.label.split(" / ").at(-1) ?? shape.label : shape.label.split(" / ")[0]);
 }
 const currentImageUrl = computed(() => assetUrl(currentState.value.imageUrl));
 const workspaceGridStyle = computed(() => ({
@@ -506,9 +532,16 @@ async function submitAuth() {
             password,
           });
     authForm.password = "";
+    currentPage.value = "workspace";
     await initializeAuthenticatedWorkspace();
     message.value = `欢迎，${currentUser.value.displayName}`;
   }, authMode.value === "login" ? "登录失败" : "注册失败");
+}
+
+function switchAuthMode(mode: AuthMode) {
+  authMode.value = mode;
+  errorDialog.value = "";
+  message.value = "";
 }
 
 async function signOut() {
@@ -549,8 +582,15 @@ async function setPage(page: PageMode) {
 
 async function loadTrainingWorkspace() {
   await runBusy(async () => {
-    const [images, tasks] = await Promise.all([listTrainingImages(trainingType.value), listTrainingTasks()]);
+    const [images, validationImages, tasks] = await Promise.all([
+      listTrainingImages(trainingType.value, trainingImagePage.value, trainingImagePageSize, trainingImageQuery.value, trainingImageShuffle.value),
+      listTrainingImages(trainingType.value, trainingValImagePage.value, trainingImagePageSize, trainingImageQuery.value, trainingValImageShuffle.value),
+      listTrainingTasks(),
+    ]);
     trainingImages.value = images.records;
+    trainingValImages.value = validationImages.records;
+    trainingImageTotal.value = images.total;
+    trainingValImageTotal.value = validationImages.total;
     trainingTasks.value = tasks;
   }, "训练数据加载失败");
 }
@@ -558,12 +598,60 @@ async function loadTrainingWorkspace() {
 async function changeTrainingType() {
   selectedTrainIds.value = [];
   selectedValIds.value = [];
+  trainingImagePage.value = 1;
+  trainingValImagePage.value = 1;
   await loadTrainingWorkspace();
+}
+
+async function searchTrainingImages() {
+  trainingImagePage.value = 1;
+  trainingValImagePage.value = 1;
+  await loadTrainingWorkspace();
+}
+
+async function changeTrainingImagePage(page: number) {
+  trainingImagePage.value = Math.max(1, Math.min(Math.max(1, Math.ceil(trainingImageTotal.value / trainingImagePageSize)), page));
+  await loadTrainingWorkspace();
+}
+
+async function changeTrainingValPage(page: number) {
+  trainingValImagePage.value = Math.max(1, Math.min(Math.max(1, Math.ceil(trainingValImageTotal.value / trainingImagePageSize)), page));
+  await loadTrainingWorkspace();
+}
+
+async function randomizeTrainingSet(target: "train" | "val") {
+  if (target === "train") { trainingImageShuffle.value = true; trainingImagePage.value = 1; }
+  else { trainingValImageShuffle.value = true; trainingValImagePage.value = 1; }
+  await loadTrainingWorkspace();
+}
+
+function removeUnannotatedFromCurrentPage(target: "train" | "val") {
+  const items = target === "train" ? trainingImages.value : trainingValImages.value;
+  const ids = items.filter((item) => !item.resultJson || Object.keys(item.resultJson).length === 0).map((item) => item.imageId);
+  if (target === "train") selectedTrainIds.value = selectedTrainIds.value.filter((id) => !ids.includes(id));
+  else selectedValIds.value = selectedValIds.value.filter((id) => !ids.includes(id));
+  message.value = uiText(`已排除本页 ${ids.length} 张无标注图片`, `Excluded ${ids.length} unannotated images on this page`);
+}
+
+async function openTrainingMetricDetail(trainingId: string) {
+  trainingMetricDetail.value = await getTrainingTask(trainingId);
+  trainingMetricHover.value = null;
+}
+
+function metricChartPoints(field: "trainLoss" | "precision" | "recall" | "map50") {
+  const values = (trainingMetricDetail.value?.metrics ?? []).map((metric) => Number(metric[field] ?? 0));
+  if (!values.length) return "";
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  return values.map((value, index) => `${(index / Math.max(1, values.length - 1)) * 100},${96 - ((value - min) / span) * 88}`).join(" ");
 }
 
 function toggleTrainingId(target: "train" | "val", imageId: string) {
   const ref = target === "train" ? selectedTrainIds : selectedValIds;
-  ref.value = ref.value.includes(imageId) ? ref.value.filter((id) => id !== imageId) : [...ref.value, imageId];
+  const other = target === "train" ? selectedValIds : selectedTrainIds;
+  if (ref.value.includes(imageId)) ref.value = ref.value.filter((id) => id !== imageId);
+  else { other.value = other.value.filter((id) => id !== imageId); ref.value = [...ref.value, imageId]; }
 }
 
 async function startTraining() {
@@ -578,6 +666,15 @@ async function startTraining() {
     message.value = uiText("训练任务已启动", "Training task started");
     await pollTrainingTask(task.trainingId);
   }, "训练任务启动失败");
+}
+
+function runTrainingSmokeTest() {
+  const problems: string[] = [];
+  if (!trainingForm.name.trim()) problems.push(uiText("任务名称为空", "run name is empty"));
+  if (!trainingForm.modelName) problems.push(uiText("未选择基础模型", "no base model selected"));
+  if (!selectedTrainIds.value.length) problems.push(uiText("训练集为空", "training set is empty"));
+  if (!selectedValIds.value.length) problems.push(uiText("验证集为空", "validation set is empty"));
+  message.value = problems.length ? `${uiText("冒烟测试失败", "Smoke test failed")}: ${problems.join("、")}` : uiText("冒烟测试通过：配置、训练集和验证集均可用", "Smoke test passed: configuration and datasets are ready");
 }
 
 async function pollTrainingTask(trainingId: string) {
@@ -1361,6 +1458,19 @@ async function submitLabel() {
   }, "新增标签失败");
 }
 
+async function submitWorkspaceLabel() {
+  await runBusy(async () => {
+    const created = await createLabel({ englishName: labelForm.englishName.trim(), chineseName: labelForm.chineseName.trim(), description: labelForm.description.trim() });
+    labelForm.englishName = "";
+    labelForm.chineseName = "";
+    labelForm.description = "";
+    workspaceLabelFormOpen.value = false;
+    await loadLabels();
+    activePresetLabelId.value = created.labelId;
+    message.value = uiText("标签已添加并设为当前标签", "Label added and selected");
+  }, "添加标签失败");
+}
+
 function startEditLabel(label: LabelConfig) {
   editingLabelId.value = label.labelId;
   editingLabel.englishName = label.englishName;
@@ -1402,7 +1512,11 @@ async function removeLabel(labelId: number) {
 }
 
 function setTool(tool: AnnotationTool) {
-  if (editingDisabled.value && ["box", "polygon", "line", "brush"].includes(tool)) {
+  if (currentTaskType.value === "pose" && !["select", "pan", "pose-point"].includes(tool)) {
+    activeTool.value = "select";
+    return;
+  }
+  if (editingDisabled.value && ["box", "polygon", "line", "brush", "pose-point"].includes(tool)) {
     message.value = resultLocked.value ? "审核通过的结果已锁定" : "审核员只能查看和审核任务";
     return;
   }
@@ -1410,6 +1524,31 @@ function setTool(tool: AnnotationTool) {
   draftShape.value = null;
   polygonDraft.value = [];
   drawing.active = false;
+}
+
+function startPoseDrawing() {
+  if (editingDisabled.value || currentTaskType.value !== "pose") return;
+  const points = resultKeypoints();
+  const personIndexes = points.map((point) => Number(point.name.match(/^person_(\d+)_/)?.[1] ?? -1)).filter((index) => index >= 0);
+  poseDrawingPerson.value = personIndexes.length ? Math.max(...personIndexes) + 1 : 0;
+  poseDrawingIndex.value = 0;
+  selectedPosePointName.value = "";
+  setTool("pose-point");
+}
+
+function addPosePoint(point: Point) {
+  if (poseDrawingPerson.value === null || poseDrawingIndex.value >= poseKeypointNames.length) return;
+  const name = `person_${poseDrawingPerson.value}_${poseKeypointNames[poseDrawingIndex.value]}`;
+  const points = resultKeypoints().filter((item) => item.name !== name);
+  points.push({ name, x: point.x, y: point.y, score: 1 });
+  currentState.value.annotationJson = { ...(currentState.value.annotationJson ?? emptyAnnotation()), poseKeypoints: points, updatedAt: new Date().toISOString() };
+  selectedPosePointName.value = name;
+  poseDrawingIndex.value += 1;
+  if (poseDrawingIndex.value >= poseKeypointNames.length) {
+    poseDrawingPerson.value = null;
+    activeTool.value = "select";
+    message.value = uiText("17 个关键点已添加，骨架线已自动生成", "17 keypoints added; skeleton lines generated automatically");
+  }
 }
 
 function onStagePointerDown(event: PointerEvent) {
@@ -1465,6 +1604,10 @@ function onOverlayPointerDown(event: PointerEvent) {
   if (!currentState.value.imageInfo || activeTool.value === "pan") return;
   const point = svgPoint(event);
   if (!point) return;
+  if (activeTool.value === "pose-point" && currentTaskType.value === "pose") {
+    addPosePoint(point);
+    return;
+  }
   if (activeTool.value === "select") {
     selectedShapeId.value = null;
     return;
@@ -2193,10 +2336,14 @@ function reviewStatusText(status: ImageReviewStatus) {
         <div class="annotation-toolbar">
           <button :class="{ active: activeTool === 'select' }" :title="uiText('选择', 'Select')" @click="setTool('select')"><MousePointer2 :size="16" />{{ uiText("选择", "Select") }}</button>
           <button :class="{ active: activeTool === 'pan' }" :title="uiText('移动画布', 'Pan canvas')" @click="setTool('pan')"><Move :size="16" />{{ uiText("移动", "Pan") }}</button>
-          <button v-if="currentTaskType !== 'segmentation'" :disabled="editingDisabled" :class="{ active: activeTool === 'box' }" :title="uiText('矩形框（B）', 'Bounding box (B)')" @click="setTool('box')"><Boxes :size="16" />{{ uiText("矩形框", "Box") }}</button>
-          <button :disabled="editingDisabled" :class="{ active: activeTool === 'polygon' }" :title="uiText('多边形（P）', 'Polygon (P)')" @click="setTool('polygon')"><Pentagon :size="16" />{{ uiText("多边形", "Polygon") }}</button>
-          <button v-if="currentTaskType !== 'segmentation'" :disabled="editingDisabled" :class="{ active: activeTool === 'line' }" :title="uiText('线段（L）', 'Line (L)')" @click="setTool('line')"><Waypoints :size="16" />{{ uiText("线段", "Line") }}</button>
+          <button v-if="currentTaskType !== 'segmentation' && currentTaskType !== 'pose' && currentTaskType !== 'caption'" :disabled="editingDisabled" :class="{ active: activeTool === 'box' }" :title="uiText('矩形框（B）', 'Bounding box (B)')" @click="setTool('box')"><Boxes :size="16" />{{ uiText("矩形框", "Box") }}</button>
+          <button v-if="currentTaskType !== 'pose' && currentTaskType !== 'caption'" :disabled="editingDisabled" :class="{ active: activeTool === 'polygon' }" :title="uiText('多边形（P）', 'Polygon (P)')" @click="setTool('polygon')"><Pentagon :size="16" />{{ uiText("多边形", "Polygon") }}</button>
+          <button v-if="currentTaskType !== 'segmentation' && currentTaskType !== 'pose' && currentTaskType !== 'caption'" :disabled="editingDisabled" :class="{ active: activeTool === 'line' }" :title="uiText('线段（L）', 'Line (L)')" @click="setTool('line')"><Waypoints :size="16" />{{ uiText("线段", "Line") }}</button>
           <button v-if="currentTaskType === 'segmentation'" :disabled="editingDisabled" :class="{ active: activeTool === 'brush' }" :title="uiText('画笔掩码', 'Brush mask')" @click="setTool('brush')"><Edit3 :size="16" />{{ uiText("画笔", "Brush") }}</button>
+          <template v-if="currentTaskType === 'pose'">
+            <button :disabled="editingDisabled" :class="{ active: activeTool === 'pose-point' }" :title="uiText('按 COCO 17 点顺序添加新人体', 'Add a person using the COCO 17-keypoint order')" @click="startPoseDrawing"><Waypoints :size="16" />{{ uiText("新增人体", "Add person") }}</button>
+            <span v-if="poseDrawingPerson !== null" class="pose-drawing-hint">{{ uiText(`请点击第 ${poseDrawingIndex + 1} 个关键点：${poseKeypointNames[poseDrawingIndex]}`, `Click keypoint ${poseDrawingIndex + 1}: ${poseKeypointNames[poseDrawingIndex]}`) }}</span>
+          </template>
           <button :disabled="polygonDraft.length < 3" @click="finishPolygon"><Check :size="16" />{{ uiText("完成", "Finish") }}</button>
           <button :disabled="polygonDraft.length === 0" @click="cancelPolygon"><RotateCcw :size="16" />{{ uiText("取消", "Cancel") }}</button>
         </div>
@@ -2280,7 +2427,7 @@ function reviewStatusText(status: ImageReviewStatus) {
               <polyline v-if="polygonDraft.length > 0" class="draft-shape" :points="polygonPoints(polygonDraft)" />
               <circle v-for="(point, index) in polygonDraft" :key="index" class="draft-point" :cx="point.x" :cy="point.y" r="6" />
               <line v-for="line in resultSkeleton()" :key="line.name" class="pose-bone" :x1="line.x1" :y1="line.y1" :x2="line.x2" :y2="line.y2" />
-              <circle v-for="point in resultKeypoints()" :key="point.name" class="keypoint" :cx="point.x" :cy="point.y" r="7" @pointerdown.stop="startPosePoint($event, point.name)" />
+              <circle v-for="point in resultKeypoints()" :key="point.name" class="keypoint" :cx="point.x" :cy="point.y" r="5" @pointerdown.stop="startPosePoint($event, point.name)" />
             </svg>
           </div>
 
@@ -2318,7 +2465,17 @@ function reviewStatusText(status: ImageReviewStatus) {
           </button>
         </div>
         <template v-if="!thumbnailCollapsed">
-          <section class="result-summary">
+          <section v-if="currentTaskType !== 'pose' && currentTaskType !== 'caption'" class="result-summary workspace-labels">
+            <div class="workspace-labels-head"><h2>{{ uiText("标签预设", "Label presets") }}</h2><button class="icon-button" :title="uiText('添加标签', 'Add label')" @click="workspaceLabelFormOpen = !workspaceLabelFormOpen"><Plus :size="15" /></button></div>
+            <form v-if="workspaceLabelFormOpen" class="workspace-label-form" @submit.prevent="submitWorkspaceLabel">
+              <input v-model="labelForm.englishName" required :placeholder="uiText('英文名称', 'English name')" />
+              <input v-model="labelForm.chineseName" required :placeholder="uiText('中文名称', 'Chinese name')" />
+              <input v-model="labelForm.description" :placeholder="uiText('描述（可选）', 'Description (optional)')" />
+              <button type="submit" :disabled="loading">{{ uiText("添加", "Add") }}</button>
+            </form>
+            <div class="workspace-label-list"><button v-for="label in labels" :key="label.labelId" :class="{ selected: activePresetLabelId === label.labelId }" @click="selectPresetLabel(label)">#{{ label.labelId }} {{ labelDisplay(label) }}</button></div>
+          </section>
+          <section v-if="currentTaskType !== 'pose' && currentTaskType !== 'caption'" class="result-summary">
             <h2>{{ uiText("选中对象", "Selected Object") }}</h2>
             <div v-if="!selectedShape" class="empty-state">
               {{ uiText("下一个标注", "Next annotation") }}：{{ activePresetLabel ? `#${activePresetLabel.labelId} ${labelDisplay(activePresetLabel)}` : uiText("未配置", "Not configured") }}
@@ -2327,7 +2484,7 @@ function reviewStatusText(status: ImageReviewStatus) {
               <strong>{{ uiText("关键点", "Keypoint") }} {{ selectedPosePointName }}</strong>
               <span v-for="point in resultKeypoints().filter((item) => item.name === selectedPosePointName)" :key="point.name">({{ Math.round(point.x) }}, {{ Math.round(point.y) }}) · {{ uiText("置信度", "Score") }} {{ point.score.toFixed(2) }}</span>
             </div>
-            <template v-else>
+            <template v-if="selectedShape">
               <label class="field-label">
                 <span>{{ uiText("标签", "Label") }}</span>
                 <select v-model="selectedLabelId">
@@ -2358,7 +2515,7 @@ function reviewStatusText(status: ImageReviewStatus) {
             </template>
           </section>
 
-          <section class="result-summary annotated-summary">
+          <section v-if="currentTaskType !== 'pose' && currentTaskType !== 'caption'" class="result-summary annotated-summary">
             <h2>{{ uiText("已标注对象", "Annotated Objects") }}</h2>
             <div v-if="annotationShapes.length === 0" class="empty-state">{{ uiText("暂无标注对象", "No annotated objects") }}</div>
             <button
@@ -2374,7 +2531,19 @@ function reviewStatusText(status: ImageReviewStatus) {
             </button>
           </section>
 
-          <section v-if="false" class="result-summary">
+          <section v-else-if="currentTaskType === 'pose'" class="result-summary pose-annotation-summary">
+            <h2>{{ uiText("人体姿态", "Human Pose") }}</h2>
+            <p class="pose-mode-note">{{ uiText("姿态标注独立于矩形框、多边形和普通标签。点击“新增人体”后按提示依次点击 17 个关键点。", "Pose annotation is independent from boxes, polygons, and regular labels. Click Add person, then click the 17 keypoints in order.") }}</p>
+            <div v-if="resultKeypoints().length === 0" class="empty-state">{{ uiText("暂无人体关键点", "No pose keypoints") }}</div>
+            <div v-for="personIndex in [...new Set(resultKeypoints().map((point) => Number(point.name.match(/^person_(\\d+)_/)?.[1] ?? 0)))]" :key="personIndex" class="pose-person-card">
+              <strong>{{ uiText("人体", "Person") }} {{ personIndex + 1 }}</strong>
+              <div class="pose-point-list">
+                <button v-for="point in resultKeypoints().filter((item) => item.name.startsWith(`person_${personIndex}_`))" :key="point.name" :class="{ selected: selectedPosePointName === point.name }" @click="selectedPosePointName = point.name"><span>{{ point.name.split("_").slice(2).join(" ") }}</span><small>{{ Math.round(point.x) }}, {{ Math.round(point.y) }} · {{ point.score.toFixed(2) }}</small></button>
+              </div>
+            </div>
+          </section>
+
+          <section class="result-summary">
             <h2>{{ uiText("任务结果", "Task Results") }}</h2>
             <div v-if="currentState.isViewingHistory" class="history-viewing">{{ uiText("正在查看历史版本，恢复后会生成一个新版本。", "Viewing a previous version. Restoring it creates a new version.") }}</div>
             <div v-if="currentState.status === 'idle'" class="empty-state">{{ uiText("当前图片暂无该任务结果", "No result for this task") }}</div>
@@ -2595,14 +2764,16 @@ function reviewStatusText(status: ImageReviewStatus) {
           <label class="field-label"><span>{{ uiText("批大小", "Batch size") }}</span><input v-model.number="trainingForm.batchSize" type="number" min="1" max="256" /></label>
           <label class="field-label"><span>{{ uiText("输入尺寸", "Image size") }}</span><input v-model.number="trainingForm.imageSize" type="number" min="128" max="2048" step="32" /></label>
         </div>
-        <button :disabled="loading || selectedTrainIds.length === 0 || selectedValIds.length === 0" @click="startTraining"><Sparkles :size="16" />{{ uiText("开始训练", "Start training") }}</button>
+        <div class="training-config-actions"><button :disabled="loading || selectedTrainIds.length === 0 || selectedValIds.length === 0" @click="startTraining"><Sparkles :size="16" />{{ uiText("开始训练", "Start training") }}</button><button :disabled="loading" @click="runTrainingSmokeTest"><Check :size="16" />{{ uiText("冒烟测试", "Smoke test") }}</button></div>
       </section>
+      <form class="training-image-search" @submit.prevent="searchTrainingImages"><Search :size="16" /><input v-model="trainingImageQuery" :placeholder="uiText('搜索图片文件名', 'Search image filename')" /><button>{{ uiText("查询", "Search") }}</button></form>
       <section class="training-data-grid">
-        <div class="result-summary"><h2>{{ uiText("训练集", "Training set") }} · {{ selectedTrainIds.length }}</h2><div class="training-image-list"><label v-for="image in trainingImages" :key="`train-${image.imageId}`" class="training-image-row"><input type="checkbox" :checked="selectedTrainIds.includes(image.imageId)" @change="toggleTrainingId('train', image.imageId)" /><span>{{ image.name }}</span></label></div></div>
-        <div class="result-summary"><h2>{{ uiText("验证集", "Validation set") }} · {{ selectedValIds.length }}</h2><div class="training-image-list"><label v-for="image in trainingImages" :key="`val-${image.imageId}`" class="training-image-row"><input type="checkbox" :checked="selectedValIds.includes(image.imageId)" @change="toggleTrainingId('val', image.imageId)" /><span>{{ image.name }}</span></label></div></div>
+        <div class="result-summary"><h2>{{ uiText("训练集", "Training set") }} · {{ selectedTrainIds.length }}</h2><div class="training-data-actions"><button @click="randomizeTrainingSet('train')">{{ uiText("随机打乱", "Shuffle") }}</button><button @click="removeUnannotatedFromCurrentPage('train')">{{ uiText("剔除无标注", "Remove empty") }}</button><button @click="trainingImages.forEach((image) => toggleTrainingId('train', image.imageId))">{{ uiText("全选本页", "Select page") }}</button></div><div class="training-image-list training-thumbnail-grid"><div v-for="image in trainingImages" :key="`train-${image.imageId}`" class="training-image-card"><input type="checkbox" :checked="selectedTrainIds.includes(image.imageId)" @change="toggleTrainingId('train', image.imageId)" /><button class="training-image-thumb-button" @click="trainingImageDetail = image"><img :src="assetUrl(image.imageUrl)" :alt="image.name" /><span>{{ image.name }}</span></button></div></div></div>
+        <div class="result-summary"><h2>{{ uiText("验证集", "Validation set") }} · {{ selectedValIds.length }}</h2><div class="training-data-actions"><button @click="randomizeTrainingSet('val')">{{ uiText("随机打乱", "Shuffle") }}</button><button @click="removeUnannotatedFromCurrentPage('val')">{{ uiText("剔除无标注", "Remove empty") }}</button><button @click="trainingValImages.forEach((image) => toggleTrainingId('val', image.imageId))">{{ uiText("全选本页", "Select page") }}</button></div><div class="training-image-list training-thumbnail-grid"><div v-for="image in trainingValImages" :key="`val-${image.imageId}`" class="training-image-card"><input type="checkbox" :checked="selectedValIds.includes(image.imageId)" @change="toggleTrainingId('val', image.imageId)" /><button class="training-image-thumb-button" @click="trainingImageDetail = image"><img :src="assetUrl(image.imageUrl)" :alt="image.name" /><span>{{ image.name }}</span></button></div></div></div>
       </section>
+      <div class="training-pagination"><div><button :disabled="trainingImagePage <= 1" @click="changeTrainingImagePage(trainingImagePage - 1)">{{ uiText("训练集上一页", "Train previous") }}</button><span>{{ trainingImagePage }} / {{ Math.max(1, Math.ceil(trainingImageTotal / trainingImagePageSize)) }} · {{ trainingImageTotal }}</span><button :disabled="trainingImagePage * trainingImagePageSize >= trainingImageTotal" @click="changeTrainingImagePage(trainingImagePage + 1)">{{ uiText("训练集下一页", "Train next") }}</button></div><div><button :disabled="trainingValImagePage <= 1" @click="changeTrainingValPage(trainingValImagePage - 1)">{{ uiText("验证集上一页", "Val previous") }}</button><span>{{ trainingValImagePage }} / {{ Math.max(1, Math.ceil(trainingValImageTotal / trainingImagePageSize)) }} · {{ trainingValImageTotal }}</span><button :disabled="trainingValImagePage * trainingImagePageSize >= trainingValImageTotal" @click="changeTrainingValPage(trainingValImagePage + 1)">{{ uiText("验证集下一页", "Val next") }}</button></div></div>
       <section class="result-summary training-metrics"><h2>{{ uiText("实时训练指标", "Live metrics") }}</h2><div v-if="trainingMetrics.length === 0" class="empty-state">{{ uiText("训练启动后显示指标", "Metrics appear after training starts") }}</div><div v-else class="metric-grid"><div v-for="metric in trainingMetrics.slice(-1)" :key="metric.metricId"><strong>Epoch {{ metric.epoch }} / {{ metric.totalEpochs }}</strong><span>Loss {{ metric.trainLoss?.toFixed(4) ?? "-" }} · mAP50 {{ metric.map50?.toFixed(4) ?? "-" }} · Precision {{ metric.precision?.toFixed(4) ?? "-" }} · Recall {{ metric.recall?.toFixed(4) ?? "-" }}</span></div></div><div v-if="trainingMetrics.length > 1" class="metric-chart"><div v-for="metric in trainingMetrics" :key="`loss-${metric.metricId}`" class="metric-bar" :style="{ height: `${Math.max(4, Math.min(100, (metric.trainLoss ?? 0) * 100))}%` }" :title="`epoch ${metric.epoch}: ${metric.trainLoss ?? '-'}`"></div></div></section>
-      <section class="result-summary"><h2>{{ uiText("训练记录", "Training runs") }}</h2><div v-if="trainingTasks.length === 0" class="empty-state">{{ uiText("暂无训练记录", "No training runs") }}</div><button v-for="task in trainingTasks" :key="task.trainingId" class="version-row" :class="{ selected: selectedTrainingId === task.trainingId }" @click="selectedTrainingId = task.trainingId; pollTrainingTask(task.trainingId)"><strong>{{ task.name }}</strong><span>{{ task.status }} · {{ task.modelName }} · {{ task.trainImageIds.length }} / {{ task.valImageIds.length }}</span></button></section>
+      <section class="result-summary"><h2>{{ uiText("训练记录", "Training runs") }}</h2><div v-if="trainingTasks.length === 0" class="empty-state">{{ uiText("暂无训练记录", "No training runs") }}</div><button v-for="task in trainingTasks" :key="task.trainingId" class="version-row" :class="{ selected: selectedTrainingId === task.trainingId }" @click="selectedTrainingId = task.trainingId; openTrainingMetricDetail(task.trainingId); pollTrainingTask(task.trainingId)"><strong>{{ task.name }}</strong><span>{{ task.status }} · {{ task.modelName }} · {{ task.trainImageIds.length }} / {{ task.valImageIds.length }}<small v-if="task.error">{{ task.error }}</small></span></button></section>
     </section>
     <section v-else class="settings-page">
       <div class="settings-header">
@@ -2748,6 +2919,34 @@ function reviewStatusText(status: ImageReviewStatus) {
       </div>
     </div>
 
+    <div v-if="trainingImageDetail" class="modal-backdrop" @click.self="trainingImageDetail = null">
+      <section class="training-image-detail" role="dialog" aria-modal="true" @click.stop>
+        <header><h2>{{ trainingImageDetail.name }}</h2><button @click="trainingImageDetail = null">{{ uiText("关闭", "Close") }}</button></header>
+        <div class="training-image-detail-body"><img :src="assetUrl(trainingImageDetail.imageUrl)" :alt="trainingImageDetail.name" /><div><h3>{{ uiText("标注数值", "Annotation values") }}</h3><pre>{{ JSON.stringify(trainingImageDetail.resultJson || trainingImageDetail.annotationJson || {}, null, 2) }}</pre></div></div>
+      </section>
+    </div>
+
+    <div v-if="trainingMetricDetail" class="modal-backdrop" @click.self="trainingMetricDetail = null">
+      <section class="training-metric-detail" role="dialog" aria-modal="true" @click.stop>
+        <header><h2>{{ trainingMetricDetail.task.name }}</h2><button @click="trainingMetricDetail = null">{{ uiText("关闭", "Close") }}</button></header>
+        <p>{{ trainingMetricDetail.task.status }} · {{ trainingMetricDetail.task.modelName }} · {{ trainingMetricDetail.task.createdAt }}</p>
+        <div v-if="trainingMetricDetail.metrics.length" class="metric-chart-panel">
+          <div class="metric-chart-legend"><span><i class="legend-loss"></i>Loss</span><span><i class="legend-precision"></i>Precision</span><span><i class="legend-recall"></i>Recall</span><span><i class="legend-map"></i>mAP50</span></div>
+          <div class="metric-chart-wrap">
+            <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="metric-line-chart">
+              <line x1="0" y1="96" x2="100" y2="96" class="chart-axis" /><line x1="0" y1="8" x2="0" y2="96" class="chart-axis" />
+              <polyline :points="metricChartPoints('trainLoss')" class="chart-line chart-loss" /><polyline :points="metricChartPoints('precision')" class="chart-line chart-precision" /><polyline :points="metricChartPoints('recall')" class="chart-line chart-recall" /><polyline :points="metricChartPoints('map50')" class="chart-line chart-map" />
+              <circle v-for="metric in trainingMetricDetail.metrics" :key="`hover-${metric.metricId}`" :cx="((metric.epoch - 1) / Math.max(1, trainingMetricDetail.metrics.length - 1)) * 100" cy="50" r="1.8" class="chart-hover-target" @mouseenter="trainingMetricHover = metric.epoch" />
+            </svg>
+            <div v-if="trainingMetricHover" class="metric-tooltip"><strong>Epoch {{ trainingMetricHover }}</strong><template v-for="metric in trainingMetricDetail.metrics.filter((item) => item.epoch === trainingMetricHover)" :key="metric.metricId"><span>Loss: {{ metric.trainLoss?.toFixed(4) ?? "-" }}</span><span>Precision: {{ metric.precision?.toFixed(4) ?? "-" }}</span><span>Recall: {{ metric.recall?.toFixed(4) ?? "-" }}</span><span>mAP50: {{ metric.map50?.toFixed(4) ?? "-" }}</span></template></div>
+          </div>
+          <div class="metric-chart-axis-labels"><span>Epoch 0</span><span>Epoch 100</span></div>
+        </div>
+        <div class="metric-detail-grid"><div v-for="metric in trainingMetricDetail.metrics.slice(-1)" :key="metric.metricId"><strong>Epoch {{ metric.epoch }} / 100</strong><span>Loss {{ metric.trainLoss?.toFixed(4) ?? "-" }}</span><span>Precision {{ metric.precision?.toFixed(4) ?? "-" }}</span><span>Recall {{ metric.recall?.toFixed(4) ?? "-" }}</span><span>mAP50 {{ metric.map50?.toFixed(4) ?? "-" }}</span></div></div>
+        <div v-if="trainingMetricDetail.metrics.length === 0" class="empty-state">{{ uiText("暂无逐轮指标", "No epoch metrics") }}</div>
+      </section>
+    </div>
+
     <div v-if="imageInfoDialogTarget" class="modal-backdrop" @click.self="imageInfoDialogTarget = null">
       <section class="image-info-dialog" role="dialog" aria-modal="true" :aria-label="uiText('图片信息', 'Image information')" @click.stop>
         <header class="image-info-dialog-head">
@@ -2800,6 +2999,7 @@ function reviewStatusText(status: ImageReviewStatus) {
           <button :class="{ active: lightboxTaskType === 'detection' }" @click="lightboxTaskType = 'detection'">{{ taskTitle("detection") }}</button>
           <button :class="{ active: lightboxTaskType === 'segmentation' }" @click="lightboxTaskType = 'segmentation'">{{ taskTitle("segmentation") }}</button>
           <button :class="{ active: lightboxTaskType === 'pose' }" @click="lightboxTaskType = 'pose'">{{ taskTitle("pose") }}</button>
+          <button :class="{ active: lightboxTaskType === 'original' }" @click="lightboxTaskType = 'original'">{{ uiText("原图", "Original") }}</button>
         </nav>
         <div
           ref="lightboxStageEl"
@@ -2817,13 +3017,13 @@ function reviewStatusText(status: ImageReviewStatus) {
               <template v-if="lightboxTaskType === 'detection'">
                 <g v-for="(item, index) in detectionOverlayBoxes" :key="`box-${index}`" class="lightbox-detection">
                   <rect :x="item.bbox?.x" :y="item.bbox?.y" :width="item.bbox?.width" :height="item.bbox?.height" />
-                  <text :x="item.bbox?.x" :y="Math.max(16, Number(item.bbox?.y ?? 0) - 5)">{{ item.label }} {{ Math.round(Number(item.confidence ?? 0) * 100) }}%</text>
+                  <text :x="item.bbox?.x" :y="Math.max(16, Number(item.bbox?.y ?? 0) - 5)">{{ detectionLabelDisplay(item.label) }} {{ Math.round(Number(item.confidence ?? 0) * 100) }}%</text>
                 </g>
               </template>
               <polygon v-else-if="lightboxTaskType === 'segmentation'" v-for="(item, index) in segmentationOverlayPolygons" :key="`segment-${index}`" class="lightbox-segment" :points="coordinatePairsToPoints(item.polygon ?? [])" />
-              <template v-else>
+              <template v-else-if="lightboxTaskType === 'pose'">
                 <line v-for="bone in poseOverlayBones" :key="bone.key" class="lightbox-pose-bone" :x1="bone.x1" :y1="bone.y1" :x2="bone.x2" :y2="bone.y2" :opacity="Math.max(.45, bone.score)" />
-                <circle v-for="point in poseOverlayPoints" :key="point.key" class="lightbox-pose-point" :cx="point.x" :cy="point.y" :r="Math.max(5, lightboxImageSize.width / 180)" :opacity="Math.max(.45, point.score)" />
+                <circle v-for="point in poseOverlayPoints" :key="point.key" class="lightbox-pose-point" :cx="point.x" :cy="point.y" :r="Math.max(3.5, lightboxImageSize.width / 180 * .7)" :opacity="Math.max(.45, point.score)" />
               </template>
             </svg>
           </div>
@@ -2859,8 +3059,8 @@ function reviewStatusText(status: ImageReviewStatus) {
 
       <label class="auth-language-picker"><span>{{ uiText("界面语言", "Interface language") }}</span><select v-model="uiLanguage" @change="persistUiLanguage"><option value="zh">中文</option><option value="en">English</option></select></label>
       <div class="auth-mode" role="tablist" :aria-label="uiText('账号操作', 'Account actions')">
-        <button :class="{ active: authMode === 'login' }" type="button" @click="authMode = 'login'">{{ uiText("登录", "Log in") }}</button>
-        <button :class="{ active: authMode === 'register' }" type="button" @click="authMode = 'register'">{{ uiText("注册", "Register") }}</button>
+        <button :class="{ active: authMode === 'login' }" type="button" @click="switchAuthMode('login')">{{ uiText("登录", "Log in") }}</button>
+        <button :class="{ active: authMode === 'register' }" type="button" @click="switchAuthMode('register')">{{ uiText("注册", "Register") }}</button>
       </div>
 
       <form class="auth-form" @submit.prevent="submitAuth">
@@ -2889,6 +3089,7 @@ function reviewStatusText(status: ImageReviewStatus) {
           <UserRound v-else :size="17" />
           {{ authMode === "login" ? uiText("登录系统", "Log in") : uiText("创建学生账号", "Create student account") }}
         </button>
+        <div v-if="errorDialog" class="auth-inline-error" role="alert">{{ uiNotice(errorDialog) }}</div>
       </form>
     </section>
 
@@ -2900,11 +3101,5 @@ function reviewStatusText(status: ImageReviewStatus) {
       </div>
     </div>
 
-    <div v-if="errorDialog" class="system-error-backdrop" role="alertdialog" aria-modal="true">
-      <div class="system-error-dialog">
-        <div><strong>{{ uiText("操作失败", "Operation failed") }}</strong><span>{{ uiNotice(errorDialog) }}</span></div>
-        <button autofocus @click="errorDialog = ''">{{ uiText("关闭", "Close") }}</button>
-      </div>
-    </div>
   </main>
 </template>

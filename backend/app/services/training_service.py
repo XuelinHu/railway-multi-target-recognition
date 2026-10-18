@@ -28,7 +28,7 @@ class TrainingService:
             self.store.update_training_task(task.training_id, dataset_dir=str(dataset_dir), output_dir=str(output_dir))
             from ultralytics import YOLO
 
-            model = YOLO(task.model_name)
+            model = YOLO(self._resolve_model(task.model_name))
 
             def on_epoch_end(trainer) -> None:
                 metrics = getattr(trainer, "metrics", {}) or {}
@@ -68,6 +68,17 @@ class TrainingService:
                 (root / "labels" / split / f"{image_id}.txt").write_text(self._labels(task, result, image.width or 1, image.height or 1, names), encoding="utf-8")
         yaml = {"path": str(root), "train": "images/train", "val": "images/val", "names": names}
         (root / "data.yaml").write_text(json.dumps(yaml, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _resolve_model(self, model_name: str) -> str:
+        candidate = Path(model_name)
+        if candidate.is_file():
+            return str(candidate)
+        settings_dir = Path(__file__).resolve().parents[2]
+        search = [settings_dir / model_name, settings_dir / f"{model_name}.pt", Path("/ds1/workspace/ai/DS-OCR2-3090-Runner/models/railway-vision") / f"{model_name}.pt"]
+        for path in search:
+            if path.is_file():
+                return str(path)
+        return model_name
 
     def _label_names(self, task: TrainingTask) -> dict[int, str]:
         labels = self.store.list_label_configs()

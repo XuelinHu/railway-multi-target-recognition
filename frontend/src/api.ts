@@ -33,7 +33,7 @@ export type ImageHistoryData = {
 
 export type LocalModelCatalog = Record<ImageTaskType, string[]>;
 export type TrainingTaskType = "detection" | "segmentation" | "pose";
-export type TrainingImage = { imageId: string; name: string; hasResult: boolean; status: string; width?: number | null; height?: number | null };
+export type TrainingImage = { imageId: string; name: string; imageUrl: string; sessionId?: string; hasResult: boolean; status: string; width?: number | null; height?: number | null; resultJson?: Record<string, unknown>; annotationJson?: Record<string, unknown> };
 export type TrainingMetric = { metricId: string; trainingId: string; epoch: number; totalEpochs: number; trainLoss?: number | null; valLoss?: number | null; precision?: number | null; recall?: number | null; map50?: number | null; map50_95?: number | null; learningRate?: number | null };
 export type TrainingTask = { trainingId: string; name: string; taskType: TrainingTaskType; modelName: string; status: string; trainImageIds: string[]; valImageIds: string[]; epochs: number; batchSize: number; imageSize: number; error: string; bestModelPath: string };
 
@@ -299,8 +299,8 @@ export function listLocalModels(): Promise<LocalModelCatalog> {
   return apiData<LocalModelCatalog>("/api/video-captions/models");
 }
 
-export function listTrainingImages(taskType: TrainingTaskType): Promise<{ records: TrainingImage[]; total: number }> {
-  const query = new URLSearchParams({ task_type: taskType, page: "1", page_size: "500" });
+export function listTrainingImages(taskType: TrainingTaskType, page = 1, pageSize = 30, search = "", shuffle = false): Promise<{ records: TrainingImage[]; total: number }> {
+  const query = new URLSearchParams({ taskType, page: String(page), pageSize: String(pageSize), query: search, shuffle: String(shuffle) });
   return apiData<{ records: TrainingImage[]; total: number }>(`/api/training/images?${query.toString()}`);
 }
 

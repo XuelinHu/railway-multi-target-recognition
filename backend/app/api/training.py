@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+import random
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_user
@@ -25,14 +27,25 @@ class TrainingCreateRequest(BaseModel):
 
 @router.get("/images", response_model=ApiResponse)
 def training_images(
-    task_type: ImageTaskType,
-    page: int = 1,
-    page_size: int = 200,
+    task_type: ImageTaskType = Query(alias="taskType"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=30, ge=1, le=500, alias="pageSize"),
+    query: str = Query(default=""),
+    shuffle: bool = Query(default=False),
     store: PostgresStore = Depends(get_store),
     current_user: AuthUser = Depends(require_user),
 ) -> ApiResponse:
-    records, total = store.list_image_assets(task_type=task_type, user_id=None if current_user.role in {"admin", "reviewer"} else current_user.user_id, page=page, page_size=min(page_size, 500))
-    return ApiResponse(data={"records": [{"imageId": item.image_id, "name": item.original_name, "hasResult": item.has_current_task_result, "status": item.task_status, "width": item.width, "height": item.height} for item in records if item.has_current_task_result], "total": total})
+    records, total = store.list_image_assets(task_type=task_type, user_id=None if current_user.role in {"admin", "reviewer"} else current_user.user_id, page=1, page_size=500, query=query)
+    if shuffle:
+        random.shuffle(records)
+    records = records[(page - 1) * page_size : page * page_size]
+    payload = []
+    for item in records:
+        if not item.has_current_task_result:
+            continue
+        result = store.get_image_task_result(item.image_id, task_type, item.session_id, None if item.session_id.startswith("video-import:") else item.user_id)
+        payload.append({"imageId": item.image_id, "name": item.original_name, "imageUrl": item.file_url, "sessionId": item.session_id, "hasResult": True, "status": item.task_status, "width": item.width, "height": item.height, "resultJson": result.result_json if result else {}, "annotationJson": result.annotation_json if result else {}})
+    return ApiResponse(data={"records": payload, "total": total})
 
 
 @router.get("/tasks", response_model=ApiResponse)

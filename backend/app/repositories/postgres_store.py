@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 
 from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select, text
 from sqlalchemy.engine import make_url
@@ -27,6 +28,23 @@ from app.models.schemas import (
 
 class Base(DeclarativeBase):
     pass
+
+
+def _task_result_count(task_type: ImageTaskType, result: ImageTaskResult | None) -> int:
+    if result is None or not result.result_json:
+        return 0
+    payload = result.result_json
+    if task_type == "detection":
+        return len(payload.get("boxes", []))
+    if task_type == "segmentation":
+        return len(payload.get("segments", []))
+    if task_type == "pose":
+        names = [str(point.get("name", "")) for point in payload.get("keypoints", []) if isinstance(point, dict)]
+        people = {match.group(1) for name in names if (match := re.match(r"person_(\d+)_", name))}
+        return len(people) or (len(names) // 17 if names else 0)
+    if task_type == "caption":
+        return len(str(result.description_text or payload.get("description", "")).strip())
+    return 0
 
 
 class AssetRecord(Base):
@@ -525,6 +543,12 @@ class PostgresStore:
             records = session.scalars(select(TrainingMetricRecord).where(TrainingMetricRecord.training_id == training_id).order_by(TrainingMetricRecord.epoch.asc())).all()
             return [self._training_metric_from_record(record) for record in records]
 
+    def delete_training_metrics(self, training_id: str) -> None:
+        with self.session_factory.begin() as session:
+            records = session.scalars(select(TrainingMetricRecord).where(TrainingMetricRecord.training_id == training_id)).all()
+            for record in records:
+                session.delete(record)
+
     def update_image_asset_file(self, image_id: str, original_name: str, file_name: str, file_path: str) -> ImageAsset | None:
         with self.session_factory.begin() as session:
             record = session.get(ImageAssetRecord, image_id)
@@ -617,16 +641,43 @@ class PostgresStore:
                 base = base.where(name_filter)
                 count_query = count_query.where(name_filter)
             base = base.order_by(ImageAssetRecord.created_at.desc())
-            records = session.scalars(base.offset(offset).limit(page_size)).all()
             total = session.scalar(count_query)
+            records = session.scalars(base).all() if task_type else session.scalars(base.offset(offset).limit(page_size)).all()
             images = [self._image_asset_from_record(record) for record in records]
             if task_type:
+                image_ids = [image.image_id for image in images]
+                task_records = session.scalars(
+                    select(ImageTaskRecord).where(
+                        ImageTaskRecord.image_id.in_(image_ids),
+                        ImageTaskRecord.task_type == task_type,
+                    )
+                ).all() if image_ids else []
+                task_map = {(record.image_id, record.session_id, record.user_key): record for record in task_records}
+                result_records = session.scalars(
+                    select(ImageTaskResultRecord).where(
+                        ImageTaskResultRecord.task_id.in_([record.id for record in task_records])
+                    )
+                ).all() if task_records else []
+                result_map = {record.task_id: record for record in result_records}
+                ranked: list[tuple[int, ImageAsset]] = []
                 for image in images:
                     task_user_id = None if image.session_id.startswith("video-import:") else image.user_id
-                    task = self.get_image_task(image.image_id, task_type, image.session_id, task_user_id)
-                    result = self.get_image_task_result(image.image_id, task_type, image.session_id, task_user_id)
+                    task = task_map.get((image.image_id, image.session_id, task_user_id or ""))
+                    result_record = result_map.get(task.id) if task else None
+                    result = ImageTaskResult(
+                        result_id=result_record.id,
+                        task_id=result_record.task_id,
+                        image_id=result_record.image_id,
+                        task_type=result_record.task_type,
+                        status=result_record.status,
+                        result_json=result_record.result_json,
+                        description_text=result_record.description_text,
+                    ) if result_record else None
                     image.task_status = task.status if task else "idle"
                     image.has_current_task_result = result is not None
+                    ranked.append((_task_result_count(task_type, result), image))
+                ranked.sort(key=lambda item: (-item[0], -item[1].created_at.timestamp()))
+                images = [image for _, image in ranked[offset : offset + page_size]]
             return images, int(total or 0)
 
     def create_or_get_image_task(
