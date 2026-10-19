@@ -392,6 +392,9 @@ button.active {
 .classification-label-picker { display: grid; gap: 6px; max-height: 180px; overflow: auto; margin-bottom: 10px; }
 .classification-label-option { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border: 1px solid #d7e1e8; border-radius: 4px; background: #fff; }
 .annotation-coordinate-list, .pose-point-details { margin-top: 7px; padding: 7px; color: #40596b; background: #f1f6f8; border-radius: 4px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.details-toggle { width: 100%; min-height: 34px; padding: 6px 8px; display: flex; align-items: center; justify-content: space-between; border: 1px solid #d7e1e8; border-radius: 4px; color: #405160; background: #f8fafc; text-align: left; }
+.details-toggle svg { transition: transform .15s ease; }
+.details-toggle svg.rotated { transform: rotate(180deg); }
 .pose-point-details { display: grid; gap: 3px; }
 
 .history-item.selected {
@@ -1020,6 +1023,9 @@ button.active {
 .workspace-label-form { display: grid; gap: 5px; margin: 8px 0; }
 .workspace-label-form input { min-width: 0; min-height: 30px; padding: 4px 7px; border: 1px solid #c9d2dc; border-radius: 4px; }
 .workspace-label-form button { min-height: 30px; }
+.workspace-quick-label { display: flex; gap: 5px; margin: 7px 0; }
+.workspace-quick-label input { flex: 1; min-width: 0; min-height: 30px; padding: 4px 7px; border: 1px solid #c9d2dc; border-radius: 4px; }
+.workspace-quick-label button { width: 30px; min-width: 30px; min-height: 30px; padding: 0; }
 .workspace-label-list { max-height: 180px; overflow: auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
 .workspace-label-list button { min-width: 0; min-height: 30px; padding: 4px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; font-size: 11px; }
 .workspace-label-list button.selected { border-color: #286eac; color: #145995; background: #eef6ff; }
@@ -1080,7 +1086,11 @@ button.active {
   font-size: 12px;
 }
 .pose-mode-note { margin: 0 0 10px; color: #66717d; font-size: 12px; line-height: 1.5; }
-.pose-person-card { margin-bottom: 8px; padding: 8px; border: 1px solid #d7dee6; border-radius: 5px; background: #f8fafc; }
+.pose-person-card { margin-bottom: 8px; padding: 8px; border: 1px solid #d7dee6; border-radius: 5px; background: #f8fafc; cursor: pointer; }
+.pose-person-card.selected { border-color: #f59e0b; background: #fff7df; box-shadow: 0 0 0 2px rgba(245,158,11,.15); }
+.pose-person-card > small { display: block; margin-top: 3px; color: #66717d; font-size: 11px; }
+.pose-highlight { stroke: #ef4444; stroke-width: 5.5; }
+.pose-highlight-point { r: 7; fill: #ef4444; stroke: #fff; stroke-width: 2; }
 .pose-point-list { margin-top: 6px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
 .pose-point-list button { min-width: 0; min-height: 34px; padding: 5px 7px; display: flex; justify-content: space-between; gap: 5px; text-align: left; background: #fff; }
 .pose-point-list button.selected { border-color: #f59e0b; background: #fff7df; }
@@ -1101,6 +1111,8 @@ button.active {
   padding: 0 8px;
   white-space: nowrap;
 }
+.caption-editor-label { display: grid; gap: 6px; margin-top: 8px; color: #405160; font-size: 12px; }
+.caption-editor-label textarea { width: 100%; min-height: 180px; padding: 9px; resize: vertical; border: 1px solid #c9d2dc; border-radius: 5px; color: #17202a; background: #fff; line-height: 1.6; }
 
 .caption-text {
   margin: 0;
@@ -2032,24 +2044,30 @@ button.active {
 .training-image-detail-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, .7fr); gap: 14px; margin-top: 12px; }
 .training-image-detail-body img { width: 100%; max-height: 65vh; object-fit: contain; background: #edf1f4; }
 .training-image-detail-body pre { max-height: 65vh; overflow: auto; padding: 10px; background: #f8fafc; font-size: 11px; white-space: pre-wrap; }
-.training-metric-detail { width: min(900px, 94vw); max-height: 85vh; overflow: auto; padding: 16px; background: #fff; border-radius: 8px; }
+.training-metric-detail { width: min(1200px, 96vw); max-height: 88vh; overflow: auto; padding: 16px; background: #fff; border-radius: 8px; }
 .training-metric-detail header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .training-metric-detail header h2 { margin: 0; }
 .metric-detail-grid { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 8px; }
 .metric-detail-grid > div { display: grid; gap: 3px; padding: 8px; border: 1px solid #d7dee6; border-radius: 4px; background: #f8fafc; font-size: 11px; }
 .metric-detail-grid span { color: #405160; }
-.metric-chart-panel { margin: 12px 0; padding: 12px; border: 1px solid #d7dee6; border-radius: 6px; background: #fbfcfe; }
-.metric-chart-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 8px; color: #405160; font-size: 12px; }
+.metric-chart-panel { position: relative; margin: 12px 0; padding: 12px; border: 1px solid #d7dee6; border-radius: 6px; background: #fbfcfe; }
+.metric-chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.metric-mini-chart { min-width: 0; padding: 8px; border: 1px solid #e1e7ee; border-radius: 5px; background: #fff; }
+.metric-mini-chart header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; color: #253849; font-size: 12px; }
+.metric-mini-chart header span { color: #66717d; font-size: 10px; }
+.metric-chart-legend { display: none; }
 .metric-chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .metric-chart-legend i { width: 18px; height: 3px; display: inline-block; border-radius: 2px; }
 .legend-loss { background: #d92d20; } .legend-precision { background: #1769aa; } .legend-recall { background: #16826b; } .legend-map { background: #7c3aed; }
 .metric-chart-wrap { position: relative; height: 280px; border-left: 1px solid #c9d2dc; border-bottom: 1px solid #c9d2dc; background: repeating-linear-gradient(to bottom, transparent 0, transparent 24%, #edf1f5 25%); }
 .metric-line-chart { width: 100%; height: 100%; overflow: visible; }
 .chart-axis { stroke: #9aa9b5; stroke-width: .35; vector-effect: non-scaling-stroke; }
-.chart-line { fill: none; stroke-width: 1.8; vector-effect: non-scaling-stroke; }
+.chart-line { fill: none; stroke-width: 1.15; vector-effect: non-scaling-stroke; }
 .chart-loss { stroke: #d92d20; } .chart-precision { stroke: #1769aa; } .chart-recall { stroke: #16826b; } .chart-map { stroke: #7c3aed; }
-.chart-hover-target { fill: transparent; stroke: transparent; pointer-events: all; }
-.metric-tooltip { position: absolute; top: 8px; right: 8px; z-index: 2; min-width: 150px; display: grid; gap: 3px; padding: 8px 10px; border: 1px solid #bfd2df; border-radius: 5px; color: #253849; background: rgba(255,255,255,.96); box-shadow: 0 5px 16px rgba(15,23,42,.14); font-size: 11px; }
+.chart-point { stroke: #fff; stroke-width: .45; vector-effect: non-scaling-stroke; pointer-events: all; }
+.chart-loss-point { fill: #d92d20; } .chart-precision-point { fill: #1769aa; } .chart-recall-point { fill: #16826b; } .chart-map-point { fill: #7c3aed; }
+.metric-tooltip { position: absolute; top: 12px; right: 12px; z-index: 2; min-width: 150px; display: grid; gap: 3px; padding: 8px 10px; border: 1px solid #bfd2df; border-radius: 5px; color: #253849; background: rgba(255,255,255,.97); box-shadow: 0 5px 16px rgba(15,23,42,.14); font-size: 11px; }
+.metric-tooltip-wide { pointer-events: none; }
 .metric-chart-axis-labels { display: flex; justify-content: space-between; margin-top: 5px; color: #66717d; font-size: 10px; }
 .training-metrics { margin-top: 12px; }
 .metric-grid > div { display: grid; gap: 6px; padding: 10px; background: #f8fafc; border: 1px solid #d7dee6; border-radius: 4px; }
@@ -2057,7 +2075,7 @@ button.active {
 .metric-chart { height: 120px; display: flex; align-items: end; gap: 3px; padding: 10px 0 0; border-bottom: 1px solid #c9d2dc; }
 .metric-bar { flex: 1; min-width: 3px; background: #16826b; opacity: .75; }
 @media (max-width: 1100px) { .training-thumbnail-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-@media (max-width: 900px) { .training-config-grid, .training-data-grid, .training-image-detail-body { grid-template-columns: 1fr; } .training-thumbnail-grid, .metric-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 900px) { .training-config-grid, .training-data-grid, .training-image-detail-body, .metric-chart-grid { grid-template-columns: 1fr; } .training-thumbnail-grid, .metric-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 @media (max-width: 900px) {
   .lightbox-caption { grid-template-columns: minmax(0, 1fr); }

@@ -9,6 +9,7 @@ import {
   ClipboardCopy,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Copy,
   Download,
   Edit3,
@@ -243,6 +244,7 @@ const polygonDraft = ref<Point[]>([]);
 const drawing = reactive({ active: false, mode: "" as "" | "draw" | "move" | "resize", shapeId: "", start: null as Point | null });
 const poseDraggingName = ref("");
 const selectedPosePointName = ref("");
+const selectedPosePersonIndex = ref<number | null>(null);
 const poseDrawingPerson = ref<number | null>(null);
 const poseDrawingIndex = ref(0);
 
@@ -252,6 +254,8 @@ const labelForm = reactive({
   description: "",
 });
 const workspaceLabelFormOpen = ref(false);
+const workspaceQuickLabel = ref("");
+const segmentationPointsOpen = ref(false);
 const editingLabelId = ref<number | null>(null);
 const editingLabel = reactive({ englishName: "", chineseName: "", description: "" });
 const currentUser = ref<AuthUser | null>(null);
@@ -645,6 +649,12 @@ function metricChartPoints(field: "trainLoss" | "precision" | "recall" | "map50"
   const max = Math.max(...values);
   const span = max - min || 1;
   return values.map((value, index) => `${(index / Math.max(1, values.length - 1)) * 100},${96 - ((value - min) / span) * 88}`).join(" ");
+}
+
+function metricChartY(field: "trainLoss" | "precision" | "recall" | "map50", metric: TrainingMetric) {
+  const values = (trainingMetricDetail.value?.metrics ?? []).map((item) => Number(item[field] ?? 0));
+  const min = Math.min(...values); const max = Math.max(...values); const span = max - min || 1;
+  return 96 - ((Number(metric[field] ?? 0) - min) / span) * 88;
 }
 
 function toggleTrainingId(target: "train" | "val", imageId: string) {
@@ -1471,6 +1481,18 @@ async function submitWorkspaceLabel() {
   }, "添加标签失败");
 }
 
+async function addQuickWorkspaceLabel() {
+  const chineseName = workspaceQuickLabel.value.trim();
+  if (!chineseName) return;
+  await runBusy(async () => {
+    const created = await createLabel({ englishName: `custom_${Date.now()}`, chineseName, description: "" });
+    workspaceQuickLabel.value = "";
+    await loadLabels();
+    activePresetLabelId.value = created.labelId;
+    message.value = uiText("标签已添加并设为当前标签", "Label added and selected");
+  }, "添加标签失败");
+}
+
 function startEditLabel(label: LabelConfig) {
   editingLabelId.value = label.labelId;
   editingLabel.englishName = label.englishName;
@@ -1534,6 +1556,15 @@ function startPoseDrawing() {
   poseDrawingIndex.value = 0;
   selectedPosePointName.value = "";
   setTool("pose-point");
+}
+
+function selectPosePerson(personIndex: number) {
+  selectedPosePersonIndex.value = personIndex;
+  selectedPosePointName.value = "";
+}
+
+function posePersonIndex(name: string) {
+  return Number(name.match(/^person_(\d+)_/)?.[1] ?? -1);
 }
 
 function addPosePoint(point: Point) {
@@ -1741,6 +1772,7 @@ function removeSelectedShape() {
 
 function selectShape(shapeId: string) {
   selectedShapeId.value = shapeId;
+  segmentationPointsOpen.value = false;
   activeTool.value = "select";
 }
 
@@ -2426,8 +2458,8 @@ function reviewStatusText(status: ImageReviewStatus) {
               <polygon v-if="draftShape?.type === 'brush' && draftShape.points.length >= 3" class="brush-draft" :points="polygonPoints([...draftShape.points, draftShape.points[0]])" />
               <polyline v-if="polygonDraft.length > 0" class="draft-shape" :points="polygonPoints(polygonDraft)" />
               <circle v-for="(point, index) in polygonDraft" :key="index" class="draft-point" :cx="point.x" :cy="point.y" r="6" />
-              <line v-for="line in resultSkeleton()" :key="line.name" class="pose-bone" :x1="line.x1" :y1="line.y1" :x2="line.x2" :y2="line.y2" />
-              <circle v-for="point in resultKeypoints()" :key="point.name" class="keypoint" :cx="point.x" :cy="point.y" r="5" @pointerdown.stop="startPosePoint($event, point.name)" />
+              <line v-for="line in resultSkeleton()" :key="line.name" :class="['pose-bone', { 'pose-highlight': selectedPosePersonIndex === posePersonIndex(line.name) }]" :x1="line.x1" :y1="line.y1" :x2="line.x2" :y2="line.y2" />
+              <circle v-for="point in resultKeypoints()" :key="point.name" :class="['keypoint', { 'pose-highlight-point': selectedPosePersonIndex === posePersonIndex(point.name) }]" :cx="point.x" :cy="point.y" r="5" @pointerdown.stop="startPosePoint($event, point.name)" />
             </svg>
           </div>
 
@@ -2467,6 +2499,7 @@ function reviewStatusText(status: ImageReviewStatus) {
         <template v-if="!thumbnailCollapsed">
           <section v-if="currentTaskType !== 'pose' && currentTaskType !== 'caption'" class="result-summary workspace-labels">
             <div class="workspace-labels-head"><h2>{{ uiText("标签预设", "Label presets") }}</h2><button class="icon-button" :title="uiText('添加标签', 'Add label')" @click="workspaceLabelFormOpen = !workspaceLabelFormOpen"><Plus :size="15" /></button></div>
+            <form class="workspace-quick-label" @submit.prevent="addQuickWorkspaceLabel"><input v-model="workspaceQuickLabel" :placeholder="uiText('输入标签后回车添加', 'Type a label and press Enter')" /><button type="submit" :disabled="loading || !workspaceQuickLabel.trim()"><Plus :size="14" /></button></form>
             <form v-if="workspaceLabelFormOpen" class="workspace-label-form" @submit.prevent="submitWorkspaceLabel">
               <input v-model="labelForm.englishName" required :placeholder="uiText('英文名称', 'English name')" />
               <input v-model="labelForm.chineseName" required :placeholder="uiText('中文名称', 'Chinese name')" />
@@ -2505,8 +2538,8 @@ function reviewStatusText(status: ImageReviewStatus) {
                 <div class="result-row"><strong>{{ uiText("终点", "End") }}</strong><span>({{ Math.round(selectedShape.points[1].x) }}, {{ Math.round(selectedShape.points[1].y) }})</span></div>
               </template>
               <template v-else>
-                <div class="result-row"><strong>{{ uiText("闭合点数", "Closed points") }}</strong><span>{{ selectedShape.points.length }}</span></div>
-                <div class="annotation-coordinate-list">{{ annotationPointsText(selectedShape.points) }}</div>
+                <button class="details-toggle" @click="segmentationPointsOpen = !segmentationPointsOpen"><span>{{ uiText("闭合点数", "Closed points") }}: {{ selectedShape.points.length }}</span><ChevronDown :class="{ rotated: segmentationPointsOpen }" :size="15" /></button>
+                <div v-if="segmentationPointsOpen" class="annotation-coordinate-list">{{ annotationPointsText(selectedShape.points) }}</div>
               </template>
               <div v-if="currentTaskType === 'pose' && selectedPosePointName" class="pose-point-details">
                 <strong>{{ uiText("关键点", "Keypoint") }} {{ selectedPosePointName }}</strong>
@@ -2535,8 +2568,8 @@ function reviewStatusText(status: ImageReviewStatus) {
             <h2>{{ uiText("人体姿态", "Human Pose") }}</h2>
             <p class="pose-mode-note">{{ uiText("姿态标注独立于矩形框、多边形和普通标签。点击“新增人体”后按提示依次点击 17 个关键点。", "Pose annotation is independent from boxes, polygons, and regular labels. Click Add person, then click the 17 keypoints in order.") }}</p>
             <div v-if="resultKeypoints().length === 0" class="empty-state">{{ uiText("暂无人体关键点", "No pose keypoints") }}</div>
-            <div v-for="personIndex in [...new Set(resultKeypoints().map((point) => Number(point.name.match(/^person_(\\d+)_/)?.[1] ?? 0)))]" :key="personIndex" class="pose-person-card">
-              <strong>{{ uiText("人体", "Person") }} {{ personIndex + 1 }}</strong>
+            <div v-for="personIndex in [...new Set(resultKeypoints().map((point) => Number(point.name.match(/^person_(\\d+)_/)?.[1] ?? 0)))]" :key="personIndex" class="pose-person-card" :class="{ selected: selectedPosePersonIndex === personIndex }" @click="selectPosePerson(personIndex)">
+              <strong>{{ uiText("人体", "Person") }} {{ personIndex + 1 }}</strong><small>{{ resultKeypoints().filter((point) => posePersonIndex(point.name) === personIndex).length }} {{ uiText("个关键点", "keypoints") }}</small>
               <div class="pose-point-list">
                 <button v-for="point in resultKeypoints().filter((item) => item.name.startsWith(`person_${personIndex}_`))" :key="point.name" :class="{ selected: selectedPosePointName === point.name }" @click="selectedPosePointName = point.name"><span>{{ point.name.split("_").slice(2).join(" ") }}</span><small>{{ Math.round(point.x) }}, {{ Math.round(point.y) }} · {{ point.score.toFixed(2) }}</small></button>
               </div>
@@ -2566,7 +2599,7 @@ function reviewStatusText(status: ImageReviewStatus) {
                   {{ captionIsTransferring ? uiText("处理中", "Processing") : uiText("播放中文简体", "Play Chinese caption") }}
                 </button>
               </div>
-              <div class="markdown-content" v-html="renderMarkdown(currentState.descriptionText)" />
+              <label class="caption-editor-label"><span>{{ uiText("编辑图像描述", "Edit image caption") }}</span><textarea v-model="currentState.descriptionText" rows="10" maxlength="20000" :placeholder="uiText('在这里编辑描述内容，然后点击保存结果或提交审核', 'Edit the caption here, then save the result or submit for review')"></textarea></label>
             </template>
               <div v-else class="result-row"><strong>{{ uiText("标注对象", "Annotations") }}</strong><span>{{ annotationShapes.length }}</span></div>
           </section>
@@ -2931,16 +2964,18 @@ function reviewStatusText(status: ImageReviewStatus) {
         <header><h2>{{ trainingMetricDetail.task.name }}</h2><button @click="trainingMetricDetail = null">{{ uiText("关闭", "Close") }}</button></header>
         <p>{{ trainingMetricDetail.task.status }} · {{ trainingMetricDetail.task.modelName }} · {{ trainingMetricDetail.task.createdAt }}</p>
         <div v-if="trainingMetricDetail.metrics.length" class="metric-chart-panel">
-          <div class="metric-chart-legend"><span><i class="legend-loss"></i>Loss</span><span><i class="legend-precision"></i>Precision</span><span><i class="legend-recall"></i>Recall</span><span><i class="legend-map"></i>mAP50</span></div>
-          <div class="metric-chart-wrap">
-            <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="metric-line-chart">
-              <line x1="0" y1="96" x2="100" y2="96" class="chart-axis" /><line x1="0" y1="8" x2="0" y2="96" class="chart-axis" />
-              <polyline :points="metricChartPoints('trainLoss')" class="chart-line chart-loss" /><polyline :points="metricChartPoints('precision')" class="chart-line chart-precision" /><polyline :points="metricChartPoints('recall')" class="chart-line chart-recall" /><polyline :points="metricChartPoints('map50')" class="chart-line chart-map" />
-              <circle v-for="metric in trainingMetricDetail.metrics" :key="`hover-${metric.metricId}`" :cx="((metric.epoch - 1) / Math.max(1, trainingMetricDetail.metrics.length - 1)) * 100" cy="50" r="1.8" class="chart-hover-target" @mouseenter="trainingMetricHover = metric.epoch" />
-            </svg>
-            <div v-if="trainingMetricHover" class="metric-tooltip"><strong>Epoch {{ trainingMetricHover }}</strong><template v-for="metric in trainingMetricDetail.metrics.filter((item) => item.epoch === trainingMetricHover)" :key="metric.metricId"><span>Loss: {{ metric.trainLoss?.toFixed(4) ?? "-" }}</span><span>Precision: {{ metric.precision?.toFixed(4) ?? "-" }}</span><span>Recall: {{ metric.recall?.toFixed(4) ?? "-" }}</span><span>mAP50: {{ metric.map50?.toFixed(4) ?? "-" }}</span></template></div>
+          <div class="metric-chart-grid">
+            <div v-for="chart in [{ key: 'trainLoss', title: 'Loss', className: 'chart-loss' }, { key: 'precision', title: 'Precision', className: 'chart-precision' }, { key: 'recall', title: 'Recall', className: 'chart-recall' }, { key: 'map50', title: 'mAP50', className: 'chart-map' }]" :key="chart.key" class="metric-mini-chart">
+              <header><strong>{{ chart.title }}</strong><span>Epoch 0–100</span></header>
+              <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="metric-line-chart">
+                <line x1="0" y1="96" x2="100" y2="96" class="chart-axis" /><line x1="0" y1="8" x2="0" y2="96" class="chart-axis" />
+                <polyline :points="metricChartPoints(chart.key as 'trainLoss' | 'precision' | 'recall' | 'map50')" class="chart-line" :class="chart.className" />
+                <circle v-for="metric in trainingMetricDetail.metrics" :key="`${chart.key}-${metric.metricId}`" :cx="(metric.epoch / 100) * 100" :cy="metricChartY(chart.key as 'trainLoss' | 'precision' | 'recall' | 'map50', metric)" r="1.5" class="chart-point" :class="`${chart.className}-point`" @mouseenter="trainingMetricHover = metric.epoch" />
+              </svg>
+              <div class="metric-chart-axis-labels"><span>0</span><span>100</span></div>
+            </div>
           </div>
-          <div class="metric-chart-axis-labels"><span>Epoch 0</span><span>Epoch 100</span></div>
+          <div v-if="trainingMetricHover" class="metric-tooltip metric-tooltip-wide"><strong>Epoch {{ trainingMetricHover }}</strong><template v-for="metric in trainingMetricDetail.metrics.filter((item) => item.epoch === trainingMetricHover)" :key="metric.metricId"><span>Loss: {{ metric.trainLoss?.toFixed(4) ?? "-" }}</span><span>Precision: {{ metric.precision?.toFixed(4) ?? "-" }}</span><span>Recall: {{ metric.recall?.toFixed(4) ?? "-" }}</span><span>mAP50: {{ metric.map50?.toFixed(4) ?? "-" }}</span></template></div>
         </div>
         <div class="metric-detail-grid"><div v-for="metric in trainingMetricDetail.metrics.slice(-1)" :key="metric.metricId"><strong>Epoch {{ metric.epoch }} / 100</strong><span>Loss {{ metric.trainLoss?.toFixed(4) ?? "-" }}</span><span>Precision {{ metric.precision?.toFixed(4) ?? "-" }}</span><span>Recall {{ metric.recall?.toFixed(4) ?? "-" }}</span><span>mAP50 {{ metric.map50?.toFixed(4) ?? "-" }}</span></div></div>
         <div v-if="trainingMetricDetail.metrics.length === 0" class="empty-state">{{ uiText("暂无逐轮指标", "No epoch metrics") }}</div>
