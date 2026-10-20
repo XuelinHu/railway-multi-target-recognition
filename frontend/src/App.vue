@@ -245,6 +245,7 @@ const drawing = reactive({ active: false, mode: "" as "" | "draw" | "move" | "re
 const poseDraggingName = ref("");
 const selectedPosePointName = ref("");
 const selectedPosePersonIndex = ref<number | null>(null);
+const posePersonIndexes = computed(() => [...new Set(resultKeypoints().map((point) => posePersonIndex(point.name)))].filter((index) => index >= 0).sort((a, b) => a - b));
 const poseDrawingPerson = ref<number | null>(null);
 const poseDrawingIndex = ref(0);
 
@@ -1567,6 +1568,10 @@ function posePersonIndex(name: string) {
   return Number(name.match(/^person_(\d+)_/)?.[1] ?? -1);
 }
 
+function posePersonVisible(name: string) {
+  return selectedPosePersonIndex.value === null || selectedPosePersonIndex.value === posePersonIndex(name);
+}
+
 function addPosePoint(point: Point) {
   if (poseDrawingPerson.value === null || poseDrawingIndex.value >= poseKeypointNames.length) return;
   const name = `person_${poseDrawingPerson.value}_${poseKeypointNames[poseDrawingIndex.value]}`;
@@ -2458,8 +2463,8 @@ function reviewStatusText(status: ImageReviewStatus) {
               <polygon v-if="draftShape?.type === 'brush' && draftShape.points.length >= 3" class="brush-draft" :points="polygonPoints([...draftShape.points, draftShape.points[0]])" />
               <polyline v-if="polygonDraft.length > 0" class="draft-shape" :points="polygonPoints(polygonDraft)" />
               <circle v-for="(point, index) in polygonDraft" :key="index" class="draft-point" :cx="point.x" :cy="point.y" r="6" />
-              <line v-for="line in resultSkeleton()" :key="line.name" :class="['pose-bone', { 'pose-highlight': selectedPosePersonIndex === posePersonIndex(line.name) }]" :x1="line.x1" :y1="line.y1" :x2="line.x2" :y2="line.y2" />
-              <circle v-for="point in resultKeypoints()" :key="point.name" :class="['keypoint', { 'pose-highlight-point': selectedPosePersonIndex === posePersonIndex(point.name) }]" :cx="point.x" :cy="point.y" r="5" @pointerdown.stop="startPosePoint($event, point.name)" />
+              <line v-for="line in resultSkeleton().filter((item) => posePersonVisible(item.name))" :key="line.name" :class="['pose-bone', { 'pose-highlight': selectedPosePersonIndex === posePersonIndex(line.name) }]" :x1="line.x1" :y1="line.y1" :x2="line.x2" :y2="line.y2" />
+              <circle v-for="point in resultKeypoints().filter((item) => posePersonVisible(item.name))" :key="point.name" :class="['keypoint', { 'pose-highlight-point': selectedPosePersonIndex === posePersonIndex(point.name) }]" :cx="point.x" :cy="point.y" r="5" @pointerdown.stop="startPosePoint($event, point.name)" />
             </svg>
           </div>
 
@@ -2568,7 +2573,8 @@ function reviewStatusText(status: ImageReviewStatus) {
             <h2>{{ uiText("人体姿态", "Human Pose") }}</h2>
             <p class="pose-mode-note">{{ uiText("姿态标注独立于矩形框、多边形和普通标签。点击“新增人体”后按提示依次点击 17 个关键点。", "Pose annotation is independent from boxes, polygons, and regular labels. Click Add person, then click the 17 keypoints in order.") }}</p>
             <div v-if="resultKeypoints().length === 0" class="empty-state">{{ uiText("暂无人体关键点", "No pose keypoints") }}</div>
-            <div v-for="personIndex in [...new Set(resultKeypoints().map((point) => Number(point.name.match(/^person_(\\d+)_/)?.[1] ?? 0)))]" :key="personIndex" class="pose-person-card" :class="{ selected: selectedPosePersonIndex === personIndex }" @click="selectPosePerson(personIndex)">
+            <label v-else class="pose-person-select"><span>{{ uiText("选择人体", "Select person") }}</span><select :value="selectedPosePersonIndex ?? ''" @change="selectedPosePersonIndex = ($event.target as HTMLSelectElement).value === '' ? null : Number(($event.target as HTMLSelectElement).value)"><option value="">{{ uiText("全部人体", "All people") }}</option><option v-for="personIndex in posePersonIndexes" :key="personIndex" :value="personIndex">{{ uiText("人体", "Person") }} {{ personIndex + 1 }} · {{ resultKeypoints().filter((point) => posePersonIndex(point.name) === personIndex).length }} {{ uiText("个关键点", "keypoints") }}</option></select></label>
+            <div v-for="personIndex in [...new Set(resultKeypoints().map((point) => Number(point.name.match(/^person_(\\d+)_/)?.[1] ?? 0)))]" v-show="selectedPosePersonIndex === null || selectedPosePersonIndex === personIndex" :key="personIndex" class="pose-person-card" :class="{ selected: selectedPosePersonIndex === personIndex }" @click="selectPosePerson(personIndex)">
               <strong>{{ uiText("人体", "Person") }} {{ personIndex + 1 }}</strong><small>{{ resultKeypoints().filter((point) => posePersonIndex(point.name) === personIndex).length }} {{ uiText("个关键点", "keypoints") }}</small>
               <div class="pose-point-list">
                 <button v-for="point in resultKeypoints().filter((item) => item.name.startsWith(`person_${personIndex}_`))" :key="point.name" :class="{ selected: selectedPosePointName === point.name }" @click="selectedPosePointName = point.name"><span>{{ point.name.split("_").slice(2).join(" ") }}</span><small>{{ Math.round(point.x) }}, {{ Math.round(point.y) }} · {{ point.score.toFixed(2) }}</small></button>
