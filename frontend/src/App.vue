@@ -42,6 +42,7 @@ import {
 } from "@lucide/vue";
 import ChatPage from "./components/ChatPage.vue";
 import LiveGesturePage from "./components/LiveGesturePage.vue";
+import SopMonitoringPage from "./components/SopMonitoringPage.vue";
 import {
   ApiRequestError,
   type AuthUser,
@@ -102,7 +103,7 @@ import {
   createTrainingTask,
 } from "./api";
 
-type PageMode = "workspace" | "videoCaptions" | "chat" | "liveGesture" | "settings" | "training";
+type PageMode = "workspace" | "videoCaptions" | "sopMonitoring" | "chat" | "liveGesture" | "settings" | "training";
 type AnnotationTool = "select" | "pan" | "box" | "polygon" | "line" | "brush" | "pose-point";
 type ShapeType = "box" | "polygon" | "line" | "brush";
 type ResizeSide = "history" | "thumbnail";
@@ -2261,6 +2262,7 @@ function reviewStatusText(status: ImageReviewStatus) {
         <nav class="task-tabs" :aria-label="uiText('工作区', 'Workspace')">
           <button :class="{ active: currentPage === 'workspace' }" @click="setPage('workspace')"><Boxes :size="16" />{{ uiText("标注工作台", "Annotation Workspace") }}</button>
           <button :class="{ active: currentPage === 'videoCaptions' }" @click="setPage('videoCaptions')"><Film :size="16" />{{ uiText("视频解帧", "Video Frames") }}</button>
+          <button :class="{ active: currentPage === 'sopMonitoring' }" @click="setPage('sopMonitoring')"><Waypoints :size="16" />{{ uiText("SOP行为监控", "SOP Monitor") }}</button>
           <button :class="{ active: currentPage === 'settings' }" @click="setPage('settings')"><Settings :size="16" />{{ uiText("系统配置", "Settings") }}</button>
           <button :class="{ active: currentPage === 'training' }" @click="setPage('training')"><Sparkles :size="16" />{{ uiText("模型训练", "Training") }}</button>
         </nav>
@@ -2785,6 +2787,8 @@ function reviewStatusText(status: ImageReviewStatus) {
         <div v-else class="empty-state detail-empty">{{ uiText("请选择一个视频帧", "Select a video frame") }}</div>
       </aside>
     </section>
+
+    <SopMonitoringPage v-else-if="currentPage === 'sopMonitoring'" :language="uiLanguage" />
 
     <ChatPage v-else-if="currentPage === 'chat'" :username="currentUser.username" :language="uiLanguage" />
 
