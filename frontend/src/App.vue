@@ -2257,6 +2257,7 @@ function reviewStatusText(status: ImageReviewStatus) {
         </div>
       </div>
       <div class="topbar-actions">
+        <a :href="`http://${window.location.hostname}:4050/`" target="_blank" rel="noopener noreferrer" :title="uiText('AI 绘画', 'AI Image Studio')" :aria-label="uiText('AI 绘画', 'AI Image Studio')"><ImageIcon :size="17" /></a>
         <nav class="task-tabs" :aria-label="uiText('工作区', 'Workspace')">
           <button :class="{ active: currentPage === 'workspace' }" @click="setPage('workspace')"><Boxes :size="16" />{{ uiText("标注工作台", "Annotation Workspace") }}</button>
           <button :class="{ active: currentPage === 'videoCaptions' }" @click="setPage('videoCaptions')"><Film :size="16" />{{ uiText("视频解帧", "Video Frames") }}</button>
